@@ -271,6 +271,7 @@ class Player:
     accomplices_deployed: int = 0
     shares: List[Share] = field(default_factory=list)
     is_harbor_master: bool = False
+    is_bot: bool = False  # computer-controlled with a random policy
 
     @property
     def unencumbered_shares(self) -> List[Share]:
@@ -290,6 +291,7 @@ class Player:
             "accomplices_deployed": self.accomplices_deployed,
             "shares": [s.to_dict() for s in self.shares],
             "is_harbor_master": self.is_harbor_master,
+            "is_bot": self.is_bot,
         }
 
     @staticmethod
@@ -303,6 +305,7 @@ class Player:
             accomplices_deployed=d["accomplices_deployed"],
             shares=[Share.from_dict(s) for s in d["shares"]],
             is_harbor_master=d["is_harbor_master"],
+            is_bot=d.get("is_bot", False),
         )
 
 

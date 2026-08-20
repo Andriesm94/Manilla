@@ -16,9 +16,11 @@ from typing import Callable, List, Optional, Tuple
 
 from manilla.engine.models import (
     BLACK_MARKET_LEVELS,
+    GAME_END_VALUE,
     INSURANCE_SHIPYARD_COST,
     PLUNDER_PAYOUTS,
     SHARE_LOAN_AMOUNT,
+    SHARE_REPAY_AMOUNT,
     SHARES_PER_WARE,
     STARTING_CASH,
     AccompliceSlot,
@@ -86,6 +88,7 @@ MISC_TITLE_DY = -(BIG_SLOT_RADIUS + 26)  # group title, above the sub-label
 MISC_LABEL_DY = -(BIG_SLOT_RADIUS + 10)  # sub-label, clear of the circle's top edge
 
 PLAYERS_PANEL_WIDTH = 300
+BOT_DELAY_MS = 60  # pacing between automated bot decisions, so the board is still watchable
 
 
 ClickRegion = Tuple[int, int, int, int, Callable[[], None]]
@@ -493,13 +496,65 @@ class BoardSetupApp(tk.Frame):
             current = self.state_obj.player_by_id(self.state_obj.current_turn_player_id)
             idx = players.index(current) if current in players else 0
             self.state_obj.current_turn_player_id = players[(idx + 1) % len(players)].id
+            self._maybe_take_bot_turn()
 
     def _finish_round_end_roll(self) -> None:
-        self._roll_dice_and_move()
-        players = self.state_obj.players
-        if players:
-            harbor_master = next((p for p in players if p.is_harbor_master), players[0])
-            self.state_obj.current_turn_player_id = harbor_master.id
+        # The dice roll may itself open pirate-boarding dialogs (round 2) --
+        # those aren't blocking, so we thread a `then` callback through
+        # rather than assuming the roll is fully resolved when it returns.
+        def after_roll() -> None:
+            players = self.state_obj.players
+            if players:
+                harbor_master = next((p for p in players if p.is_harbor_master), players[0])
+                self.state_obj.current_turn_player_id = harbor_master.id
+            self.refresh()
+            self._maybe_take_bot_turn()
+
+        self._roll_dice_and_move(then=after_roll)
+
+    def _maybe_take_bot_turn(self) -> None:
+        if self.state_obj.phase != Phase.ACCOMPLICE_ROUND:
+            return
+        player = self._current_turn_player()
+        if player is not None and player.is_bot:
+            self.after(BOT_DELAY_MS, self._bot_take_accomplice_turn)
+
+    def _bot_take_accomplice_turn(self) -> None:
+        state = self.state_obj
+        actions: List[Callable[[], None]] = []
+
+        for punt in state.punts:
+            if punt.ware is None or punt.status != PuntStatus.ON_ROUTE:
+                continue
+            vacant = [s for s in punt.ware_slots if s.occupant is None]
+            if vacant:
+                actions.append(lambda p=punt, s=vacant[0]: self._place_or_remove_punt_accomplice(p, s))
+
+        for dock in (state.port, state.shipyard):
+            vacant = [s for s in dock.slots.values() if s.occupant is None]
+            if vacant:
+                actions.append(lambda d=dock, s=vacant[0]: self._place_or_remove_dock_accomplice(d, s))
+
+        pb = state.pirate_boat
+        if pb.captain.occupant is None:
+            actions.append(lambda: self._place_or_remove_pirate_slot(pb.captain, False))
+        elif pb.second.occupant is None:
+            actions.append(lambda: self._place_or_remove_pirate_slot(pb.second, True))
+
+        for slot in (state.pilot_island.small, state.pilot_island.large):
+            if slot.occupant is None:
+                actions.append(lambda s=slot: self._place_or_remove_accomplice(s))
+
+        if state.insurance.occupant is None:
+            actions.append(self._place_or_remove_insurance)
+
+        if actions:
+            random.choice(actions)()
+        else:
+            # No vacant accomplice space anywhere -- advance the turn
+            # without placing so the voyage doesn't stall.
+            self._advance_turn()
+
         self.refresh()
 
     def _settle_payment(self, player: Player, amount: int) -> bool:
@@ -528,6 +583,9 @@ class BoardSetupApp(tk.Frame):
         shares = player.unencumbered_shares
         if not shares:
             return None
+
+        if player.is_bot:
+            return random.choice(shares)
 
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title(f"{player.name}: take credit")
@@ -632,7 +690,7 @@ class BoardSetupApp(tk.Frame):
             if player is not None:
                 player.cash -= ins.payment
 
-    def _roll_dice_and_move(self) -> None:
+    def _roll_dice_and_move(self, then: Optional[Callable[[], None]] = None) -> None:
         rolls: dict = {}
         for punt in self.state_obj.punts:
             if punt.ware is None or punt.status != PuntStatus.ON_ROUTE:
@@ -692,10 +750,26 @@ class BoardSetupApp(tk.Frame):
             if self.state_obj.black_market.is_game_over():
                 message += "\n\nGAME OVER -- a ware's value has reached 30!"
 
-        messagebox.showinfo("Punts move", message)
+        # A fully computer-controlled voyage shouldn't stall on a modal that
+        # nobody's there to dismiss.
+        all_bots = bool(self.state_obj.players) and all(p.is_bot for p in self.state_obj.players)
+        if not all_bots:
+            messagebox.showinfo("Punts move", message)
+
+        def finish() -> None:
+            if then:
+                then()
+            if self.state_obj.phase != Phase.PROFIT_DISTRIBUTION:
+                return
+            if self.state_obj.black_market.is_game_over():
+                self._show_game_over_dialog()
+            elif all_bots:
+                self.after(BOT_DELAY_MS, self.on_start_next_voyage)
 
         if board_after:
-            self._handle_pirate_boarding()
+            self._handle_pirate_boarding(finish)
+        else:
+            finish()
 
     def _pay_port_shipyard_rewards(self) -> List[Tuple[str, int]]:
         """Port/shipyard accomplices are paid once, at the end of the third
@@ -783,12 +857,15 @@ class BoardSetupApp(tk.Frame):
 
         captain_player = self.state_obj.player_by_id(pb.captain.occupant) if pb.captain.occupant else None
         captain_name = captain_player.name if captain_player else "The pirates"
-        send_to_port = messagebox.askyesno(
-            "Pirates plunder!",
-            f"Punt {punt.id} ({punt.ware.value}) was caught on space 13!\n"
-            f"{captain_name} splits {payout} PESOS with the crew.\n\n"
-            f"Send this punt to the PORT? (No sends it to the shipyard instead.)",
-        )
+        if captain_player is not None and captain_player.is_bot:
+            send_to_port = random.random() < 0.5
+        else:
+            send_to_port = messagebox.askyesno(
+                "Pirates plunder!",
+                f"Punt {punt.id} ({punt.ware.value}) was caught on space 13!\n"
+                f"{captain_name} splits {payout} PESOS with the crew.\n\n"
+                f"Send this punt to the PORT? (No sends it to the shipyard instead.)",
+            )
         status = PuntStatus.IN_PORT if send_to_port else PuntStatus.IN_SHIPYARD
         key = self._first_available_dock_key(status, exclude_punt=punt)
         self._dock_punt(punt, status, key)
@@ -796,24 +873,26 @@ class BoardSetupApp(tk.Frame):
     # ------------------------------------------------------------------
     # Pirate boarding (right after the second movement round)
     # ------------------------------------------------------------------
-    def _handle_pirate_boarding(self) -> None:
+    def _handle_pirate_boarding(self, then: Optional[Callable[[], None]] = None) -> None:
         """Punts caught on space 13 after round 2 (still ON_ROUTE) may be
         boarded for free by the pirates -- captain first, then the second
         pirate -- if a vacant ware-accomplice space is available on them."""
+        finish = then or (lambda: None)
         candidates = [
             p
             for p in self.state_obj.punts
             if p.ware is not None and p.status == PuntStatus.ON_ROUTE and p.position == SEA_ROUTE_LENGTH
         ]
         if not candidates:
+            finish()
             return
         pb = self.state_obj.pirate_boat
 
         def after_captain() -> None:
             if pb.second.occupant:
-                self._show_boarding_dialog(pb.second.occupant, "Second pirate", candidates, self.refresh)
+                self._show_boarding_dialog(pb.second.occupant, "Second pirate", candidates, finish)
             else:
-                self.refresh()
+                finish()
 
         if pb.captain.occupant:
             self._show_boarding_dialog(pb.captain.occupant, "Pirate captain", candidates, after_captain)
@@ -827,6 +906,12 @@ class BoardSetupApp(tk.Frame):
         boardable = [p for p in candidates if any(s.occupant is None for s in p.ware_slots)]
         if player is None or not boardable:
             then()
+            return
+
+        if player.is_bot:
+            # Random policy: board a random eligible punt about 60% of the
+            # time, otherwise skip.
+            self.after(BOT_DELAY_MS, lambda: self._bot_board_or_skip(player, boardable, then))
             return
 
         dialog = tk.Toplevel(self.winfo_toplevel())
@@ -860,6 +945,14 @@ class BoardSetupApp(tk.Frame):
                 command=lambda p=punt: board(p),
             ).pack(padx=12, pady=2, fill=tk.X)
         ttk.Button(dialog, text="Skip", command=resolve).pack(pady=(8, 10))
+
+    def _bot_board_or_skip(self, player: Player, boardable: List[Punt], then: Callable[[], None]) -> None:
+        if random.random() < 0.6:
+            punt = random.choice(boardable)
+            slot = next(s for s in punt.ware_slots if s.occupant is None)
+            slot.occupant = player.id
+            self.refresh()
+        then()
 
     # ------------------------------------------------------------------
     # Pilots (just before the third movement round)
@@ -898,6 +991,10 @@ class BoardSetupApp(tk.Frame):
             then()
             return
 
+        if player.is_bot:
+            self.after(BOT_DELAY_MS, lambda: self._bot_small_pilot_move(eligible, then))
+            return
+
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title(f"Small Pilot: {player.name} ({player.color})")
         dialog.transient(self.winfo_toplevel())
@@ -932,11 +1029,22 @@ class BoardSetupApp(tk.Frame):
         ttk.Button(btn_row, text="Move backward (-1)", command=lambda: move(-1)).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_row, text="Skip", command=resolve).pack(side=tk.LEFT, padx=4)
 
+    def _bot_small_pilot_move(self, eligible: List[Punt], then: Callable[[], None]) -> None:
+        if random.random() < 0.5:
+            punt = random.choice(eligible)
+            self._apply_pilot_move(punt, random.choice([1, -1]))
+            self.refresh()
+        then()
+
     def _show_large_pilot_dialog(self, player_id: str, then: Callable[[], None]) -> None:
         player = self.state_obj.player_by_id(player_id)
         eligible = self._eligible_pilot_punts()
         if player is None or not eligible:
             then()
+            return
+
+        if player.is_bot:
+            self.after(BOT_DELAY_MS, lambda: self._bot_large_pilot_move(eligible, then))
             return
 
         dialog = tk.Toplevel(self.winfo_toplevel())
@@ -1041,6 +1149,21 @@ class BoardSetupApp(tk.Frame):
         ttk.Button(action_row, text="Skip", command=resolve).pack(side=tk.LEFT, padx=4)
 
         update_mode()
+
+    def _bot_large_pilot_move(self, eligible: List[Punt], then: Callable[[], None]) -> None:
+        roll = random.random()
+        if roll < 0.35:
+            pass  # skip
+        elif roll < 0.65 or len(eligible) < 2:
+            punt = random.choice(eligible)
+            self._apply_pilot_move(punt, random.choice([2, -2]))
+            self.refresh()
+        else:
+            a, b = random.sample(eligible, 2)
+            self._apply_pilot_move(a, random.choice([1, -1]))
+            self._apply_pilot_move(b, random.choice([1, -1]))
+            self.refresh()
+        then()
 
     def update_turn_label(self) -> None:
         player = self._current_turn_player()
@@ -1347,6 +1470,7 @@ class BoardSetupApp(tk.Frame):
 
         rows_frame = ttk.Frame(dialog)
         color_vars: List[tk.StringVar] = []
+        bot_vars: List[tk.BooleanVar] = []
 
         error_var = tk.StringVar(value="")
 
@@ -1354,6 +1478,7 @@ class BoardSetupApp(tk.Frame):
             for child in rows_frame.winfo_children():
                 child.destroy()
             color_vars.clear()
+            bot_vars.clear()
             try:
                 count = int(count_var.get())
             except (tk.TclError, ValueError):
@@ -1372,6 +1497,12 @@ class BoardSetupApp(tk.Frame):
                 combo.pack(side=tk.LEFT)
                 color_vars.append(var)
 
+                bot_var = tk.BooleanVar(value=False)
+                ttk.Checkbutton(row, text="Computer (random policy)", variable=bot_var).pack(
+                    side=tk.LEFT, padx=(10, 0)
+                )
+                bot_vars.append(bot_var)
+
         count_spin = ttk.Spinbox(dialog, from_=4, to=5, width=4, textvariable=count_var, command=rebuild_rows)
         count_spin.pack(anchor="w", padx=12)
         count_spin.bind("<Return>", lambda e: rebuild_rows())
@@ -1381,20 +1512,39 @@ class BoardSetupApp(tk.Frame):
 
         tk.Label(dialog, textvariable=error_var, fg="#b02a2a").pack(padx=12)
 
-        def on_confirm() -> None:
+        def build_state() -> Optional[GameState]:
             colors = [v.get() for v in color_vars]
             if len(set(colors)) != len(colors):
                 error_var.set("Each player needs a distinct color.")
-                return
+                return None
             names = [f"Player {i + 1}" for i in range(len(colors))]
-            self.state_obj = GameState.new_default_game(names, colors=colors)
+            state = GameState.new_default_game(names, colors=colors)
+            for player, bot_var in zip(state.players, bot_vars):
+                player.is_bot = bot_var.get()
+            return state
+
+        def on_confirm() -> None:
+            state = build_state()
+            if state is None:
+                return
+            self.state_obj = state
             self.state_obj.game_setup_confirmed = True
             self._round_placements = 0
             dialog.destroy()
             self.refresh()
             self._show_auction_dialog()
 
-        ttk.Button(dialog, text="Confirm", command=on_confirm).pack(pady=(4, 12))
+        def on_simulate_all_bots() -> None:
+            for bot_var in bot_vars:
+                bot_var.set(True)
+            on_confirm()
+
+        btn_row = ttk.Frame(dialog)
+        btn_row.pack(pady=(4, 12))
+        ttk.Button(btn_row, text="Confirm", command=on_confirm).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Simulate (all computers)", command=on_simulate_all_bots).pack(
+            side=tk.LEFT, padx=4
+        )
 
         rebuild_rows()
 
@@ -1453,6 +1603,19 @@ class BoardSetupApp(tk.Frame):
             cp = current_player()
             status_var.set(f"Highest bid: {auction['highest_bid']} PESOS - {holder_text}\n\n{cp.name}'s turn ({cp.color})")
             bid_var.set(auction["highest_bid"] + 1)
+            if cp.is_bot:
+                self.after(BOT_DELAY_MS, bot_take_turn)
+
+        def bot_take_turn() -> None:
+            cp = current_player()
+            affordable = cp.cash + SHARE_LOAN_AMOUNT * len(cp.unencumbered_shares)
+            # Random policy: pick a number 1-20; bid it if that's a valid
+            # raise they can afford, otherwise pass.
+            candidate = random.randint(1, 20)
+            if candidate > auction["highest_bid"] and candidate <= affordable:
+                on_bid(candidate)
+            else:
+                on_pass()
 
         def end_auction() -> None:
             winner = auction["active"][0] if auction["active"] else None
@@ -1470,13 +1633,14 @@ class BoardSetupApp(tk.Frame):
             else:
                 self._show_load_and_place_dialog()
 
-        def on_bid() -> None:
+        def on_bid(amount: Optional[int] = None) -> None:
             cp = current_player()
-            try:
-                amount = int(bid_var.get())
-            except (tk.TclError, ValueError):
-                log("Enter a valid bid amount.")
-                return
+            if amount is None:
+                try:
+                    amount = int(bid_var.get())
+                except (tk.TclError, ValueError):
+                    log("Enter a valid bid amount.")
+                    return
             if amount <= auction["highest_bid"]:
                 log(f"Bid must be higher than {auction['highest_bid']}.")
                 return
@@ -1508,6 +1672,12 @@ class BoardSetupApp(tk.Frame):
         available = [w for w in Ware if self.state_obj.shares_available(w) > 0]
         if not available:
             then()
+            return
+
+        if player.is_bot:
+            # Random policy: about half the time, buy a random available
+            # ware if it's affordable (with credit); otherwise skip.
+            self.after(BOT_DELAY_MS, lambda: self._bot_buy_share(player, available, then))
             return
 
         dialog = tk.Toplevel(self.winfo_toplevel())
@@ -1555,10 +1725,53 @@ class BoardSetupApp(tk.Frame):
         ttk.Button(btn_row, text="Buy", command=on_buy).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_row, text="Skip", command=resolve).pack(side=tk.LEFT, padx=4)
 
+    def _bot_buy_share(self, player: Player, available: List[Ware], then: Callable[[], None]) -> None:
+        if random.random() < 0.5:
+            ware = random.choice(available)
+            price = self.state_obj.black_market.share_price(ware)
+            if self._settle_payment(player, price):
+                player.shares.append(Share(ware=ware))
+                self.refresh()
+        then()
+
+    def _apply_load_and_place(self, harbor_master: Player, loaded: List[Ware], positions: dict) -> None:
+        unloaded = next(w for w in Ware if w not in loaded)
+        for punt, ware in zip(self.state_obj.punts, loaded):
+            punt.ware = ware
+            punt.position = positions[ware]
+            punt.status = PuntStatus.ON_ROUTE
+            punt.dock_slot = None
+            punt.ware_slots = Punt.new(punt.id, ware).ware_slots
+        self.state_obj.unloaded_ware = unloaded
+        self.state_obj.phase = Phase.ACCOMPLICE_ROUND
+        self.state_obj.current_turn_player_id = harbor_master.id
+        self._round_placements = 0
+        self.refresh()
+        self._maybe_take_bot_turn()
+
+    def _bot_load_and_place(self, harbor_master: Player) -> None:
+        wares = list(Ware)
+        random.shuffle(wares)
+        loaded = wares[:3]
+        for _ in range(200):
+            a = random.randint(0, MAX_START_SPACE)
+            b = random.randint(0, MAX_START_SPACE)
+            c = PUNT_START_SUM - a - b
+            if 0 <= c <= MAX_START_SPACE:
+                positions = {loaded[0]: a, loaded[1]: b, loaded[2]: c}
+                break
+        else:
+            positions = {loaded[0]: 4, loaded[1]: 3, loaded[2]: 2}
+        self._apply_load_and_place(harbor_master, loaded, positions)
+
     def _show_load_and_place_dialog(self) -> None:
         harbor_master = next((p for p in self.state_obj.players if p.is_harbor_master), None)
         if harbor_master is None:
             return  # no bids were placed, so nothing to load/place yet
+
+        if harbor_master.is_bot:
+            self.after(BOT_DELAY_MS, lambda: self._bot_load_and_place(harbor_master))
+            return
 
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title(f"Harbor Master: {harbor_master.name}")
@@ -1625,19 +1838,9 @@ class BoardSetupApp(tk.Frame):
             if len(loaded) != 3 or total != PUNT_START_SUM:
                 error_var.set(f"Pick exactly 3 wares with start positions summing to {PUNT_START_SUM}.")
                 return
-            unloaded = next(w for w in Ware if w not in loaded)
-            for punt, ware in zip(self.state_obj.punts, loaded):
-                punt.ware = ware
-                punt.position = int(pos_vars[ware].get())
-                punt.status = PuntStatus.ON_ROUTE
-                punt.dock_slot = None
-                punt.ware_slots = Punt.new(punt.id, ware).ware_slots
-            self.state_obj.unloaded_ware = unloaded
-            self.state_obj.phase = Phase.ACCOMPLICE_ROUND
-            self.state_obj.current_turn_player_id = harbor_master.id
-            self._round_placements = 0
+            positions = {w: int(pos_vars[w].get()) for w in loaded}
             dialog.destroy()
-            self.refresh()
+            self._apply_load_and_place(harbor_master, loaded, positions)
 
         confirm_btn = ttk.Button(dialog, text="Confirm", command=on_confirm, state="disabled")
         confirm_btn.pack(pady=(4, 12))
@@ -1714,6 +1917,103 @@ class BoardSetupApp(tk.Frame):
         self._round_placements = 0
         self.refresh()
         self._show_auction_dialog()
+
+    # ------------------------------------------------------------------
+    # Game over
+    # ------------------------------------------------------------------
+    def _compute_fortune(self, player: Player) -> Tuple[int, int, int, int, int]:
+        """(cash, PESOS actually spent unencumbering shares, value of the
+        shares that end up unencumbered, total wealth, count of shares that
+        stayed encumbered).
+
+        Unencumbering costs 15 PESOS a share and is paid for out of cash --
+        if a player can't afford all of them, they unencumber as many as
+        they can afford, highest-value ware first (since the repay cost is
+        flat, "afford" just means "run out of cash", so priority order is
+        what decides which shares make the cut). Every share that ends up
+        unencumbered (already was, or just got paid off) is valued at its
+        ware's raw black market value; anything left encumbered stays worth
+        nothing and costs nothing further -- money never goes negative."""
+        market = self.state_obj.black_market
+        cash = player.cash
+        remaining = cash
+
+        by_value_desc = sorted(player.encumbered_shares, key=lambda s: market.values[s.ware], reverse=True)
+        paid_off = []
+        for share in by_value_desc:
+            if remaining < SHARE_REPAY_AMOUNT:
+                break
+            remaining -= SHARE_REPAY_AMOUNT
+            paid_off.append(share)
+
+        unencumbered_cost = cash - remaining
+        counted_shares = player.unencumbered_shares + paid_off
+        shares_value = sum(market.values[s.ware] for s in counted_shares)
+        total = remaining + shares_value
+        forfeited = len(player.encumbered_shares) - len(paid_off)
+        return cash, unencumbered_cost, shares_value, total, forfeited
+
+    def _show_game_over_dialog(self) -> None:
+        dialog = tk.Toplevel(self.winfo_toplevel())
+        dialog.title("Game Over - Final Standings")
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        ttk.Label(dialog, text="Game Over!", font=("Segoe UI", 14, "bold")).pack(padx=16, pady=(16, 2))
+        ended_ware = next(
+            (w for w, v in self.state_obj.black_market.values.items() if v >= GAME_END_VALUE), None
+        )
+        if ended_ware is not None:
+            ttk.Label(dialog, text=f"{ended_ware.value.title()} reached {GAME_END_VALUE} on the black market.", foreground="#555").pack(
+                padx=16, pady=(0, 10)
+            )
+
+        rows = [(p,) + self._compute_fortune(p) for p in self.state_obj.players]
+        rows.sort(key=lambda r: r[4], reverse=True)  # rank by total wealth, highest first
+
+        table = ttk.Frame(dialog)
+        table.pack(padx=16, pady=(0, 8))
+
+        headers = ["Rank", "Player", "Cash", "- Unencumber", "+ Shares value", "= Total wealth"]
+        for col, text in enumerate(headers):
+            ttk.Label(table, text=text, font=("Segoe UI", 9, "bold")).grid(
+                row=0, column=col, padx=8, pady=4, sticky="w"
+            )
+
+        medals = {1: "1st", 2: "2nd", 3: "3rd"}
+        notes: List[str] = []
+        for rank, (player, cash, enc_cost, shares_value, total, forfeited) in enumerate(rows, start=1):
+            r = rank
+            ttk.Label(table, text=medals.get(rank, f"{rank}th")).grid(row=r, column=0, padx=8, pady=2, sticky="w")
+            ttk.Label(table, text=f"{player.name} ({player.color})").grid(
+                row=r, column=1, padx=8, pady=2, sticky="w"
+            )
+            ttk.Label(table, text=str(cash)).grid(row=r, column=2, padx=8, pady=2, sticky="e")
+            ttk.Label(table, text=f"-{enc_cost}").grid(row=r, column=3, padx=8, pady=2, sticky="e")
+            ttk.Label(table, text=f"+{shares_value}").grid(row=r, column=4, padx=8, pady=2, sticky="e")
+            ttk.Label(table, text=str(total), font=("Segoe UI", 9, "bold")).grid(
+                row=r, column=5, padx=8, pady=2, sticky="e"
+            )
+            if forfeited > 0:
+                share_word = "share" if forfeited == 1 else "shares"
+                notes.append(
+                    f"{player.name} ({player.color}) couldn't afford to unencumber {forfeited} {share_word} "
+                    f"({SHARE_REPAY_AMOUNT} PESOS each) -- {'it stays' if forfeited == 1 else 'they stay'} "
+                    f"encumbered and worth nothing."
+                )
+
+        if notes:
+            ttk.Label(
+                dialog, text="\n".join(notes), foreground="#b02a2a", wraplength=420, justify=tk.LEFT
+            ).pack(padx=16, pady=(0, 8), anchor="w")
+
+        winner = rows[0][0]
+        ttk.Label(
+            dialog, text=f"Winner: {winner.name} ({winner.color})!", font=("Segoe UI", 11, "bold"), foreground="#1a7a1a"
+        ).pack(pady=(4, 4))
+
+        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(pady=(2, 16))
 
     def on_save(self) -> None:
         path = filedialog.asksaveasfilename(defaultextension=".json", filetypes=[("JSON", "*.json")])
@@ -1818,6 +2118,9 @@ class BoardSetupApp(tk.Frame):
         name_var = tk.StringVar(value=player.name)
         name_entry = ttk.Entry(name_row, textvariable=name_var, width=10)
         name_entry.pack(side=tk.LEFT)
+
+        if player.is_bot:
+            ttk.Label(name_row, text="[CPU]", foreground="#666").pack(side=tk.LEFT, padx=(4, 0))
 
         def on_name_change(*_ , p=player, var=name_var):
             p.name = var.get()
