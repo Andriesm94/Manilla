@@ -1,0 +1,26 @@
+MANILLA for 4/5 players
+
+different phases: 
+
+A. bid for harbor master --> find a way to tie a certain money amount to this office: 
+	1. buy share
+	2. advantage of playing first (compared to second/third/fourth?) --> count this in money! 
+		maybe simulate a few games to get a view on how to express position as money. 
+		AND/OR use heuristic: use the position you would go for as harbor master. 
+		AND/OR try to guess which boats each player would put forward. 
+	3. choose which wares' share price go up
+
+B. place pawn
+	1. calculate own advantage for each possible pawn position 
+	2. at every moment, possess an estimation of each player's wealth. - use known_wealth and estimated_wealth 
+
+
+an action is justified if: 
+it gives you more relative wealth than anyone else OR (if not first) the gap between you and the players before you becomes smaller. 
+
+
+start by creating the board
+then do B.1
+then do B.2
+	
+
