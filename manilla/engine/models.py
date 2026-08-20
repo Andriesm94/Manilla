@@ -52,10 +52,10 @@ WARE_SLOT_COUNT: Dict[Ware, int] = {
 
 # Ascending slot prices per ware punt (paid when an accomplice is placed).
 DEFAULT_WARE_SLOT_PRICES: Dict[Ware, List[int]] = {
-    Ware.GINSENG: [1, 2, 3],
-    Ware.NUTMEG: [2, 3, 4],
-    Ware.SILK: [3, 4, 5],
-    Ware.JADE: [3, 4, 5, 5],
+    Ware.GINSENG: [3, 2, 1],
+    Ware.NUTMEG: [4, 3, 2],
+    Ware.SILK: [5, 4, 3],
+    Ware.JADE: [5, 5, 4, 3],
 }
 
 # Payouts for port / shipyard slots (A/B/C) -- these fill in that order (see
@@ -83,6 +83,10 @@ PLUNDER_PAYOUTS: Dict[Ware, int] = {
 }
 SHARE_LOAN_AMOUNT = 12
 SHARE_REPAY_AMOUNT = 15
+
+# What the insurance-holder pays for repairs, by how many punts wrecked in
+# the shipyard this voyage.
+INSURANCE_SHIPYARD_COST: Dict[int, int] = {1: 6, 2: 14, 3: 29}
 STARTING_CASH = 30
 STARTING_SHARES_PER_PLAYER = 2
 SHARES_PER_WARE = 5
@@ -90,6 +94,7 @@ SEA_ROUTE_LENGTH = 13  # spaces 0-13
 PUNT_START_SUM = 9
 MAX_START_SPACE = 5
 GAME_END_VALUE = 30
+BLACK_MARKET_LEVELS = [0, 5, 10, 20, 30]
 
 
 @dataclass
@@ -114,8 +119,12 @@ class BlackMarket:
     def share_price(self, ware: Ware) -> int:
         return max(5, self.values[ware])
 
-    def raise_value(self, ware: Ware, step: int = 5) -> None:
-        self.values[ware] = min(GAME_END_VALUE, self.values[ware] + step)
+    def raise_value(self, ware: Ware) -> None:
+        """Move one step up the (non-uniform) 0-5-10-20-30 track."""
+        current = self.values[ware]
+        idx = BLACK_MARKET_LEVELS.index(current) if current in BLACK_MARKET_LEVELS else 0
+        if idx < len(BLACK_MARKET_LEVELS) - 1:
+            self.values[ware] = BLACK_MARKET_LEVELS[idx + 1]
 
     def is_game_over(self) -> bool:
         return any(v >= GAME_END_VALUE for v in self.values.values())
@@ -318,6 +327,7 @@ class GameState:
     accomplice_round_index: int = 0
     movement_round_index: int = 0
     current_turn_player_id: Optional[str] = None
+    game_setup_confirmed: bool = False  # player count/colors locked once True
 
     @property
     def player_count(self) -> int:
@@ -407,6 +417,7 @@ class GameState:
             "accomplice_round_index": self.accomplice_round_index,
             "movement_round_index": self.movement_round_index,
             "current_turn_player_id": self.current_turn_player_id,
+            "game_setup_confirmed": self.game_setup_confirmed,
         }
 
     @staticmethod
@@ -427,6 +438,7 @@ class GameState:
             accomplice_round_index=d["accomplice_round_index"],
             movement_round_index=d["movement_round_index"],
             current_turn_player_id=d.get("current_turn_player_id"),
+            game_setup_confirmed=d.get("game_setup_confirmed", False),
         )
 
     def save(self, path: str) -> None:
@@ -468,7 +480,9 @@ class GameState:
                 if pool:
                     player.shares.append(pool.pop())
 
-        players[0].is_harbor_master = True
+        # No default harbor master -- that's decided by the auction dialog
+        # (falling back to player 0 as the very first voyage's starting
+        # bidder only, not as a pre-assigned office).
 
         punts = [Punt.new(i) for i in range(3)]
 

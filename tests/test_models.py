@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manilla.engine.models import (
+    BLACK_MARKET_LEVELS,
     PIRATE_PRICE,
     PLUNDER_PAYOUTS,
     SHARES_PER_WARE,
@@ -33,8 +34,9 @@ class TestDefaultGame(unittest.TestCase):
             self.assertEqual(player.accomplices_in_hand, 3)
             self.assertEqual(len(player.shares), 2)
 
+        # No harbor master is pre-assigned -- that's decided by the auction.
         harbor_masters = [p for p in state.players if p.is_harbor_master]
-        self.assertEqual(len(harbor_masters), 1)
+        self.assertEqual(len(harbor_masters), 0)
 
     def test_default_3_player_game_has_four_accomplices_and_four_rounds(self):
         state = GameState.new_default_game(["A", "B", "C"])
@@ -66,6 +68,15 @@ class TestBlackMarket(unittest.TestCase):
         self.assertFalse(market.is_game_over())
         market.values[Ware.JADE] = 30
         self.assertTrue(market.is_game_over())
+
+    def test_raise_value_follows_the_nonuniform_track(self):
+        market = BlackMarket()
+        self.assertEqual(BLACK_MARKET_LEVELS, [0, 5, 10, 20, 30])
+        expected_next = {0: 5, 5: 10, 10: 20, 20: 30, 30: 30}
+        for current, expected in expected_next.items():
+            market.values[Ware.NUTMEG] = current
+            market.raise_value(Ware.NUTMEG)
+            self.assertEqual(market.values[Ware.NUTMEG], expected)
 
 
 class TestValidation(unittest.TestCase):
