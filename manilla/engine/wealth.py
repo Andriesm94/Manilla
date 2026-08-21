@@ -17,14 +17,14 @@ price and charges a flat redemption cost per encumbered share, which is
 accurate enough to rank actions mid-voyage without needing to simulate the
 endgame every time.
 
-An opponent's already-placed ware-punt or pirate accomplice is valued
-against its *projected* final occupancy, not however many slots happen to
-be filled right now -- see `project_final_occupancy`: a slot splitting a
-cargo profit tends to fill up over the placement rounds since joining an
-occupied slot still beats leaving that share on the table, so this assumes
-full capacity by default and only falls back to the current count in the
-last two turns before the third (final) dice throw, when there's no
-realistic time left for another accomplice to join.
+An opponent's already-placed ware-punt accomplice is valued against its
+*projected* final occupancy, not however many slots happen to be filled
+right now -- see `project_final_occupancy`: a slot splitting a cargo profit
+tends to fill up over the placement rounds since joining an occupied slot
+still beats leaving that share on the table, so this assumes full capacity
+by default and only falls back to the current count in the last two turns
+before the third (final) dice throw, when there's no realistic time left
+for another accomplice to join.
 
 This projection isn't specific to valuing *someone else's* slot -- the same
 logic applies when deciding whether to take a vacant slot yourself. A punt
@@ -38,6 +38,14 @@ the same projection -- that's not a bug, it reflects that turn order and
 slot scarcity, not the EV formula, are what decide who actually claims
 which slot once a punt is genuinely worth joining at any point in its fill
 sequence.
+
+The pirate boat is deliberately valued differently (`_project_pirate_count`,
+not `project_final_occupancy`): with only two possible slots, "will a
+second pirate board" has an exact answer rather than a capacity worth
+assuming -- they only will if a 2-way split still clears PIRATE_PRICE for
+them. Assuming full capacity there regardless would undervalue a pirate
+opportunity that's genuinely worth taking solo but not worth sharing, since
+no rational second pirate actually boards a split that loses them money.
 
 A **rival** is any opponent whose estimated wealth exceeds the viewer's own;
 REV is the coin gap to a specific rival (`rival_wealth_est - my_wealth_est`,
@@ -59,6 +67,7 @@ from manilla.engine.expected_value import (
     Numeric,
     dock_slot_expected_payout,
     pirate_expected_payout,
+    pirate_slot_ev,
     punt_port_probability,
     punt_shipyard_probability,
     ware_slot_expected_payout,
@@ -106,17 +115,45 @@ def _turns_remaining_in_final_accomplice_round(state: GameState):
 
 
 def project_final_occupancy(state: GameState, current_occupied: int, max_slots: int) -> int:
-    """How many accomplices a ware punt or the pirate boat is projected to
-    end up with once the voyage resolves. Defaults to full capacity --
-    a slot splitting a cargo profit tends to fill up over the placement
-    rounds, since joining an already-occupied slot still beats leaving that
-    share on the table -- except in the last two turns before the third
-    (final) dice throw, where so little placement time remains that
-    whatever is occupied right now is assumed to be final."""
+    """How many accomplices a ware punt is projected to end up with once the
+    voyage resolves. Defaults to full capacity -- a slot splitting a cargo
+    profit tends to fill up over the placement rounds, since joining an
+    already-occupied slot still beats leaving that share on the table --
+    except in the last two turns before the third (final) dice throw, where
+    so little placement time remains that whatever is occupied right now is
+    assumed to be final.
+
+    Pirates don't use this (see `_project_pirate_count`): with only two
+    possible slots, whether a second pirate boards has one direct answer --
+    they only join if a 2-way split is still worth it to them -- so there's
+    an exact check to make rather than a capacity to assume.
+    """
     turns_left = _turns_remaining_in_final_accomplice_round(state)
     if turns_left is not None and turns_left <= 2:
         return current_occupied
     return max_slots
+
+
+def _project_pirate_count(state: GameState, current_pirate_count: int, punts) -> int:
+    """How many pirates the boat is projected to end up with. Unlike a ware
+    punt's `project_final_occupancy`, this doesn't need to assume full
+    capacity and hope it holds up: with only two possible slots, a second
+    pirate's own decision is the exact answer to whether they board at all
+    -- they will, if and only if splitting every qualifying punt's plunder
+    two ways is still worth PIRATE_PRICE to them (`pirate_slot_ev(punts,
+    2)`). That's a fact to check, not a growth pattern to project, so a
+    solo-but-not-shareable pirate opportunity is correctly valued as
+    staying solo rather than being discounted as if a second were coming.
+    Still respects the last-two-turns exception: even a profitable second
+    boarding needs a placement turn left to actually happen in."""
+    if current_pirate_count >= 2:
+        return 2
+    turns_left = _turns_remaining_in_final_accomplice_round(state)
+    if turns_left is not None and turns_left <= 2:
+        return current_pirate_count
+    if pirate_slot_ev(punts, 2) >= 0:
+        return 2
+    return max(1, current_pirate_count)
 
 
 def _ware_slot_gross_per_accomplice(state: GameState, punt, p_safe_if_caught: Numeric) -> Fraction:
@@ -191,12 +228,12 @@ def expected_accomplice_return(state: GameState, player_id: str, p_safe_if_caugh
     pirate_ids = {"captain": state.pirate_boat.captain.occupant, "second": state.pirate_boat.second.occupant}
     if player_id in pirate_ids.values():
         current_pirate_count = sum(1 for v in pirate_ids.values() if v is not None)
-        pirate_count = project_final_occupancy(state, current_pirate_count, max_slots=2)
         punts = [
             (p.ware, p.position, _rounds_remaining(state))
             for p in state.punts
             if p.ware is not None and p.status == PuntStatus.ON_ROUTE
         ]
+        pirate_count = _project_pirate_count(state, current_pirate_count, punts)
         total += pirate_expected_payout(punts, pirate_count)
 
     return total
