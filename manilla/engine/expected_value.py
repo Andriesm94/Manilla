@@ -67,6 +67,31 @@ def punt_shipyard_probability(start: int, rounds_remaining: int) -> Fraction:
     return position_outcomes(start, rounds_remaining)["shipwrecked"]
 
 
+def ware_slot_expected_payout(
+    ware: Ware,
+    start: int,
+    rounds_remaining: int,
+    accomplices_on_punt: int,
+    p_safe_if_caught: Numeric = 1,
+) -> Fraction:
+    """Expected gross coin payout (no price subtracted) of holding a ware
+    punt's accomplice slot -- what `ware_slot_ev` nets against the slot's
+    price, and also what `manilla.engine.wealth` uses to value a slot an
+    opponent has *already* paid for, where subtracting the price again would
+    double-count a cost already reflected in their current cash.
+
+    `accomplices_on_punt` is the total number of accomplices sharing this
+    punt's cargo profit, PLUNDER_PAYOUTS[ware], including the one being
+    valued -- it only pays out if the punt actually reaches port safely.
+    """
+    if not 1 <= accomplices_on_punt <= len(DEFAULT_WARE_SLOT_PRICES[ware]):
+        raise ValueError(f"accomplices_on_punt must be between 1 and {len(DEFAULT_WARE_SLOT_PRICES[ware])}")
+
+    payout_share = PLUNDER_PAYOUTS[ware] // accomplices_on_punt
+    p_safe = punt_port_probability(start, rounds_remaining, p_safe_if_caught)
+    return p_safe * payout_share
+
+
 def ware_slot_ev(
     ware: Ware,
     slot_index: int,
@@ -78,31 +103,24 @@ def ware_slot_ev(
     """Expected net coin return of paying to place an accomplice on a ware
     punt's `slot_index`'th slot (0 = cheapest/first-filled), for that punt's
     ware currently sitting at `start` with `rounds_remaining` movement
-    rounds left.
-
-    `accomplices_on_punt` is the total number of accomplices that will end
-    up on this punt once you take this slot (including yourself) -- its
-    cargo profit, PLUNDER_PAYOUTS[ware], splits evenly between them, but
-    only pays out if the punt actually reaches port safely.
+    rounds left. See `ware_slot_expected_payout` for the gross payout this
+    nets against the slot's price.
     """
     prices = DEFAULT_WARE_SLOT_PRICES[ware]
     if not 0 <= slot_index < len(prices):
         raise ValueError(f"{ware.value} has slots 0..{len(prices) - 1}, got {slot_index}")
-    if not 1 <= accomplices_on_punt <= len(prices):
-        raise ValueError(f"accomplices_on_punt must be between 1 and {len(prices)}")
 
     price = prices[slot_index]
-    payout_share = PLUNDER_PAYOUTS[ware] // accomplices_on_punt
-    p_safe = punt_port_probability(start, rounds_remaining, p_safe_if_caught)
-    return p_safe * payout_share - price
+    gross = ware_slot_expected_payout(ware, start, rounds_remaining, accomplices_on_punt, p_safe_if_caught)
+    return gross - price
 
 
-def pirate_slot_ev(
+def pirate_expected_payout(
     punts: Iterable[Tuple[Ware, int, int]],
     pirate_count: int,
 ) -> Fraction:
-    """Expected net coin return of paying PIRATE_PRICE for a captain or
-    second pirate slot, given the currently loaded punts as
+    """Expected gross plunder payout (no PIRATE_PRICE subtracted) of holding
+    a captain or second pirate slot, given the currently loaded punts as
     (ware, start, rounds_remaining) triples.
 
     Plunder is automatic and mandatory whenever any pirate slot is occupied
@@ -110,9 +128,9 @@ def pirate_slot_ev(
     out (`BoardSetupApp._resolve_plunder`) -- there's no board-or-skip
     choice at that point, so this sums cleanly over every currently loaded
     punt with no opponent-decision uncertainty. `pirate_count` is the total
-    number of pirate slots occupied once you take this one (1 if you'd be
-    alone, 2 if the other pirate slot is already filled) -- the payout for
-    each qualifying punt splits between however many pirates are aboard.
+    number of pirate slots occupied (1 if alone, 2 if both captain and
+    second are filled) -- the payout for each qualifying punt splits between
+    however many pirates are aboard.
     """
     if pirate_count not in (1, 2):
         raise ValueError("pirate_count must be 1 or 2 (only captain and second exist)")
@@ -121,7 +139,17 @@ def pirate_slot_ev(
     for ware, start, rounds_remaining in punts:
         p_caught = position_outcomes(start, rounds_remaining)["caught_on_13"]
         total += p_caught * (PLUNDER_PAYOUTS[ware] // pirate_count)
-    return total - PIRATE_PRICE
+    return total
+
+
+def pirate_slot_ev(
+    punts: Iterable[Tuple[Ware, int, int]],
+    pirate_count: int,
+) -> Fraction:
+    """Expected net coin return of paying PIRATE_PRICE for a captain or
+    second pirate slot. See `pirate_expected_payout` for the gross sum this
+    nets against the price."""
+    return pirate_expected_payout(punts, pirate_count) - PIRATE_PRICE
 
 
 def dock_fill_distribution(arrival_probs: Sequence[Numeric]) -> Dict[int, Fraction]:
@@ -154,17 +182,27 @@ def dock_slot_fill_probability(arrival_probs: Sequence[Numeric], key: str) -> Fr
     return sum((p for count, p in dist.items() if count >= rank), Fraction(0))
 
 
-def dock_slot_ev(dock: str, key: str, arrival_probs: Sequence[Numeric]) -> Fraction:
-    """Expected net coin return of paying to place an accomplice on a
+def _dock_tables(dock: str) -> Tuple[Dict[str, int], Dict[str, int]]:
+    if dock == "port":
+        return DEFAULT_PORT_PAYOUTS, DEFAULT_PORT_PRICES
+    if dock == "shipyard":
+        return DEFAULT_SHIPYARD_PAYOUTS, DEFAULT_SHIPYARD_PRICES
+    raise ValueError(f"dock must be 'port' or 'shipyard', got {dock!r}")
+
+
+def dock_slot_expected_payout(dock: str, key: str, arrival_probs: Sequence[Numeric]) -> Fraction:
+    """Expected gross coin payout (no price subtracted) of holding a
     port/shipyard slot `key`, given every currently loaded punt's own
     probability of ending up at that destination (see
     `punt_port_probability` / `punt_shipyard_probability`)."""
-    if dock == "port":
-        payouts, prices = DEFAULT_PORT_PAYOUTS, DEFAULT_PORT_PRICES
-    elif dock == "shipyard":
-        payouts, prices = DEFAULT_SHIPYARD_PAYOUTS, DEFAULT_SHIPYARD_PRICES
-    else:
-        raise ValueError(f"dock must be 'port' or 'shipyard', got {dock!r}")
-
+    payouts, _ = _dock_tables(dock)
     p_filled = dock_slot_fill_probability(arrival_probs, key)
-    return p_filled * payouts[key] - prices[key]
+    return p_filled * payouts[key]
+
+
+def dock_slot_ev(dock: str, key: str, arrival_probs: Sequence[Numeric]) -> Fraction:
+    """Expected net coin return of paying to place an accomplice on a
+    port/shipyard slot `key`. See `dock_slot_expected_payout` for the gross
+    payout this nets against the slot's price."""
+    _, prices = _dock_tables(dock)
+    return dock_slot_expected_payout(dock, key, arrival_probs) - prices[key]
