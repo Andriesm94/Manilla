@@ -376,7 +376,7 @@ class TestActionImpact(unittest.TestCase):
         impact = action_impact(state, beliefs, "p0", lambda s: None)
         self.assertEqual(impact.my_gain, 0)
         self.assertEqual(impact.rival_gains, {"p1": Fraction(0)})
-        self.assertEqual(impact.total_rev_after, rev(state, beliefs, "p0", "p1"))
+        self.assertEqual(impact.total_rev_after, -rev(state, beliefs, "p0", "p1"))
 
     def test_taking_a_pirate_slot_hurts_a_rivals_endangered_ware_accomplice(self):
         # p1's ginseng accomplice goes from "safe if caught" to "certain
@@ -396,7 +396,7 @@ class TestActionImpact(unittest.TestCase):
         after = GameState.from_dict(state.to_dict())
         apply_pirate_placement("captain", "p0")(after)
         expected_total = sum(
-            wealth_estimate(after, beliefs, r) - wealth_estimate(after, beliefs, "p0") for r in ("p1", "p2")
+            wealth_estimate(after, beliefs, "p0") - wealth_estimate(after, beliefs, r) for r in ("p1", "p2")
         )
         self.assertEqual(impact.total_rev_after, expected_total)
 

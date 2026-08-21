@@ -53,10 +53,10 @@ positive when they're ahead). `action_impact` turns this into "pick the
 action that best closes the gap to every current rival at once": it
 simulates a candidate action (any caller-supplied `GameState` mutation, from
 placing a pirate to a pilot's nudge) and reports how it moves your own
-wealth and every current rival's, plus the total post-action REV summed
-across them (`sum(rival_wealth_after - my_wealth_after)`, per the user's
-own formula) -- the smaller that total, the better the action is for your
-standing against the field, not just for your own raw EV.
+wealth and every current rival's, plus the total post-action advantage
+summed across them (`sum(my_wealth_after - rival_wealth_after)`, per the
+user's own formula) -- the larger that total, the better the action is for
+your standing against the field, not just for your own raw EV.
 
 An action doesn't only change the acting player's own numbers. Placing a
 pirate makes every currently-loaded punt genuinely vulnerable to plunder
@@ -322,7 +322,8 @@ def rev_adjusted_score(my_ev_gain: Numeric, rival_ev_gain: Numeric = 0) -> Fract
 @dataclass
 class ActionImpact:
     """What a candidate action does to `my_id` and to every current rival,
-    per `action_impact`."""
+    per `action_impact`. `total_rev_after` is the score to maximize when
+    comparing candidate actions -- see `action_impact`."""
 
     my_gain: Fraction
     rival_gains: Dict[str, Fraction] = field(default_factory=dict)
@@ -348,9 +349,9 @@ def action_impact(
     then recomputed for `my_id` and every one of those rivals against the
     mutated copy.
 
-    `total_rev_after` is `sum(rival_wealth_after - my_wealth_after)` over
+    `total_rev_after` is `sum(my_wealth_after - rival_wealth_after)` over
     that same rival set -- the user's own formula for "advantage over the
-    field": the action that *minimizes* this is the one that most narrows
+    field": the action that *maximizes* this is the one that most widens
     (or best reverses) your combined gap to everyone currently ahead of
     you, which is not always the same action that maximizes your own raw
     EV gain (`my_gain`) -- an action that helps you a little while hurting
@@ -370,7 +371,7 @@ def action_impact(
     for r in rivals:
         w_after = wealth_estimate(after, beliefs, r, p_safe_if_caught)
         rival_gains[r] = w_after - rival_before[r]
-        total_rev_after += w_after - my_after
+        total_rev_after += my_after - w_after
 
     return ActionImpact(my_gain=my_after - my_before, rival_gains=rival_gains, total_rev_after=total_rev_after)
 
