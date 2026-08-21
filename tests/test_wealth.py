@@ -25,9 +25,12 @@ from manilla.engine.wealth import (
     action_impact,
     apply_pilot_move,
     apply_pirate_placement,
+    best_pilot_move,
     encumbered_penalty,
     expected_accomplice_return,
     identify_rivals,
+    pilot_move_candidates,
+    pilot_slot_value,
     pirate_threat,
     project_final_occupancy,
     rev,
@@ -468,6 +471,94 @@ class TestApplyPilotMove(unittest.TestCase):
     def test_ignores_an_unknown_punt_id(self):
         state = _make_state()
         apply_pilot_move(99, 2)(state)  # should not raise
+
+
+class TestPilotMoveCandidates(unittest.TestCase):
+    def _two_eligible_state(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[1].ware = Ware.NUTMEG
+        state.punts[1].status = PuntStatus.ON_ROUTE
+        state.punts[2].ware = None
+        return state
+
+    def test_small_pilot_offers_plus_and_minus_one_per_eligible_punt_plus_skip(self):
+        state = self._two_eligible_state()
+        candidates = pilot_move_candidates(state, "small")
+        self.assertEqual(len(candidates), 1 + 2 * 2)  # skip + (+1/-1) per punt
+
+    def test_large_pilot_adds_single_punt_by_two_and_two_punt_combinations(self):
+        state = self._two_eligible_state()
+        candidates = pilot_move_candidates(state, "large")
+        # skip + (+2/-2) per punt + 1 pair * 4 direction combinations
+        self.assertEqual(len(candidates), 1 + 2 * 2 + 1 * 4)
+
+    def test_ignores_unloaded_and_non_on_route_punts(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[1].ware = Ware.NUTMEG
+        state.punts[1].status = PuntStatus.IN_PORT
+        state.punts[2].ware = None
+        candidates = pilot_move_candidates(state, "small")
+        self.assertEqual(len(candidates), 1 + 2)  # only punt 0 is eligible
+
+    def test_rejects_unknown_pilot_size(self):
+        state = _make_state()
+        with self.assertRaises(ValueError):
+            pilot_move_candidates(state, "medium")
+
+
+class TestBestPilotMoveAndPilotSlotValue(unittest.TestCase):
+    def _rival_punt_state(self, position):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = position
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [
+            AccompliceSlot(price=1, occupant="p1"),
+            AccompliceSlot(price=2),
+            AccompliceSlot(price=3),
+        ]
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        state.movement_round_index = 2  # matches the pilot phase's real timing
+        state.players[1].cash = 500  # guarantee p1 counts as a rival
+        return state
+
+    def test_picks_the_move_that_most_hurts_the_rival(self):
+        # I hold no stake in p1's punt, so my own wealth is unaffected by
+        # any of these choices -- the best move is whichever one most
+        # lowers p1's arrival odds (moving their punt backward), since
+        # that's what maximizes total_rev_after.
+        state = self._rival_punt_state(position=11)
+        beliefs = infer_beliefs(state, "p0")
+        action, impact = best_pilot_move(state, beliefs, "p0", "small")
+
+        forward = action_impact(state, beliefs, "p0", apply_pilot_move(0, 1))
+        backward = action_impact(state, beliefs, "p0", apply_pilot_move(0, -1))
+        skip = action_impact(state, beliefs, "p0", lambda s: None)
+
+        self.assertEqual(
+            impact.total_rev_after,
+            max(forward.total_rev_after, backward.total_rev_after, skip.total_rev_after),
+        )
+        self.assertEqual(impact.total_rev_after, backward.total_rev_after)
+
+    def test_pilot_slot_value_matches_best_pilot_move(self):
+        state = self._rival_punt_state(position=11)
+        beliefs = infer_beliefs(state, "p0")
+        _, impact = best_pilot_move(state, beliefs, "p0", "small")
+        value = pilot_slot_value(state, beliefs, "p0", "small")
+        self.assertEqual(value, impact.total_rev_after)
+
+    def test_reassessment_reflects_the_current_board_not_a_cached_answer(self):
+        early = self._rival_punt_state(position=6)
+        late = self._rival_punt_state(position=11)
+        value_early = pilot_slot_value(early, infer_beliefs(early, "p0"), "p0", "small")
+        value_late = pilot_slot_value(late, infer_beliefs(late, "p0"), "p0", "small")
+        self.assertNotEqual(value_early, value_late)
 
 
 if __name__ == "__main__":

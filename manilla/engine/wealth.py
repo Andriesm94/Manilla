@@ -67,13 +67,25 @@ now defaults to `None` everywhere in this module, meaning "derive it from
 whether the pirate boat is actually occupied" rather than a flat assumed
 constant -- callers can still pass an explicit value for a counterfactual
 ("what if I ignore pirates"), but the default reflects the real board.
+
+Valuing an accomplice slot that grants a *future choice* -- the pilot
+island -- means looking ahead to that choice rather than treating the slot
+itself as the action. `pilot_slot_value` enumerates every move a small or
+large pilot could make (including doing nothing) and reports the best
+`total_rev_after` among them, via `best_pilot_move`. That same function is
+meant to be called again, fresh, once the pilot phase actually arrives
+(`BoardSetupApp._show_pilot_dialogs`, right before the third movement
+round) -- punt positions will very likely have shifted since the
+accomplice was placed, so whatever looked best back then is a starting
+estimate, not a plan to execute unquestioned.
 """
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from manilla.engine.beliefs import ShareBeliefs, share_value_estimate
 from manilla.engine.expected_value import (
@@ -421,3 +433,96 @@ def apply_pilot_move(punt_id: int, delta: int) -> Callable[[GameState], None]:
             punt.position = SEA_ROUTE_LENGTH
 
     return _apply
+
+
+def _combine_actions(*mutators: Callable[[GameState], None]) -> Callable[[GameState], None]:
+    def _apply(state: GameState) -> None:
+        for mutator in mutators:
+            mutator(state)
+
+    return _apply
+
+
+def pilot_move_candidates(state: GameState, pilot_size: str) -> List[Callable[[GameState], None]]:
+    """Every legal pilot move for `pilot_size` ('small' or 'large'), as
+    ready-to-use `action_impact` mutators, given whichever punts are
+    currently `ON_ROUTE` -- plus skipping (a no-op), always included as a
+    candidate, since not moving anything can be the right call. A small
+    pilot moves one eligible punt by ±1; a large pilot moves one punt by
+    ±2, or two *different* punts by ±1 each
+    (`BoardSetupApp._show_large_pilot_dialog`)."""
+    if pilot_size not in ("small", "large"):
+        raise ValueError(f"pilot_size must be 'small' or 'large', got {pilot_size!r}")
+
+    eligible = [p.id for p in state.punts if p.ware is not None and p.status == PuntStatus.ON_ROUTE]
+    candidates: List[Callable[[GameState], None]] = [lambda s: None]
+
+    if pilot_size == "small":
+        for punt_id in eligible:
+            candidates.append(apply_pilot_move(punt_id, 1))
+            candidates.append(apply_pilot_move(punt_id, -1))
+    else:
+        for punt_id in eligible:
+            candidates.append(apply_pilot_move(punt_id, 2))
+            candidates.append(apply_pilot_move(punt_id, -2))
+        for punt_a, punt_b in itertools.combinations(eligible, 2):
+            for delta_a, delta_b in itertools.product((1, -1), repeat=2):
+                candidates.append(
+                    _combine_actions(apply_pilot_move(punt_a, delta_a), apply_pilot_move(punt_b, delta_b))
+                )
+
+    return candidates
+
+
+def best_pilot_move(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    pilot_size: str,
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> Tuple[Callable[[GameState], None], ActionImpact]:
+    """The best pilot move currently available for `pilot_size`, and its
+    `ActionImpact` -- ranked by `total_rev_after` (maximize), the same
+    metric every other REV-based decision in this module uses. Ties keep
+    whichever candidate was considered first (skipping, then single-punt
+    moves, then two-punt combinations), so indifference defaults toward
+    doing less.
+
+    Call this fresh wherever a real decision is needed -- see the module
+    docstring: the answer depends entirely on the punt positions in
+    `state` right now, and is never assumed to still hold once the board
+    has moved on.
+    """
+    candidates = pilot_move_candidates(state, pilot_size)
+    best_action = candidates[0]
+    best_impact = action_impact(state, beliefs, my_id, best_action, p_safe_if_caught)
+    for action in candidates[1:]:
+        impact = action_impact(state, beliefs, my_id, action, p_safe_if_caught)
+        if impact.total_rev_after > best_impact.total_rev_after:
+            best_action, best_impact = action, impact
+    return best_action, best_impact
+
+
+def pilot_slot_value(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    pilot_size: str,
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> Fraction:
+    """The value of placing an accomplice on the pilot island's
+    `pilot_size` slot: the best `total_rev_after` achievable among every
+    move currently available (including skipping) -- see `best_pilot_move`.
+    Gross: doesn't net the slot's own price
+    (`DEFAULT_PILOT_PRICES[pilot_size]`), since `total_rev_after` is a
+    wealth-comparison figure across every rival, not a single payout with
+    an obvious price to net it against.
+
+    This is a placement-time estimate, not a locked-in plan -- punt
+    positions will likely have moved by the time the pilot phase actually
+    arrives, so `best_pilot_move` needs to be re-run against the live
+    board to pick the real move, rather than reusing whatever was best
+    here.
+    """
+    _, impact = best_pilot_move(state, beliefs, my_id, pilot_size, p_safe_if_caught)
+    return impact.total_rev_after
