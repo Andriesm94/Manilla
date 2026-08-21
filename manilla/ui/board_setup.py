@@ -108,8 +108,17 @@ class BoardSetupApp(tk.Frame):
         self._build_body()
         self.refresh()
 
+        # Open already scrolled down to the shares-available panel (the last
+        # section of the left column) so the harbor master can see share
+        # supply at a glance without having to scroll for it first.
+        self.after(100, self._scroll_left_panel_to_shares)
+
         if not self.state_obj.game_setup_confirmed:
             self.after(50, self._show_new_game_setup_dialog)
+
+    def _scroll_left_panel_to_shares(self) -> None:
+        self.left_scroll.update_idletasks()
+        self.left_scroll.yview_moveto(1.0)
 
     # ------------------------------------------------------------------
     # Layout scaffolding
@@ -179,6 +188,7 @@ class BoardSetupApp(tk.Frame):
         left_scroll.configure(yscrollcommand=left_vsb.set)
         left_scroll.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         left_vsb.pack(side=tk.LEFT, fill=tk.Y)
+        self.left_scroll = left_scroll
 
         # The board itself is wider (and, with the port/shipyard docks, taller)
         # than most screens, so it gets its own scrollbars in both directions
@@ -1586,7 +1596,8 @@ class BoardSetupApp(tk.Frame):
         bid_row.pack(padx=12, pady=6)
         ttk.Label(bid_row, text="Bid amount:").pack(side=tk.LEFT)
         bid_var = tk.IntVar(value=1)
-        ttk.Spinbox(bid_row, from_=1, to=9999, width=6, textvariable=bid_var).pack(side=tk.LEFT, padx=6)
+        bid_spin = ttk.Spinbox(bid_row, from_=1, to=9999, width=6, textvariable=bid_var)
+        bid_spin.pack(side=tk.LEFT, padx=6)
         ttk.Button(bid_row, text="Bid", command=lambda: on_bid()).pack(side=tk.LEFT, padx=4)
         ttk.Button(bid_row, text="Pass", command=lambda: on_pass()).pack(side=tk.LEFT, padx=4)
 
@@ -1602,7 +1613,12 @@ class BoardSetupApp(tk.Frame):
             holder_text = f"{holder.name} ({holder.color})" if holder else "no bids yet"
             cp = current_player()
             status_var.set(f"Highest bid: {auction['highest_bid']} PESOS - {holder_text}\n\n{cp.name}'s turn ({cp.color})")
-            bid_var.set(auction["highest_bid"] + 1)
+            # The bid control itself is capped at cash + credit (12 PESOS per
+            # unencumbered share) -- can't even type/scroll past what's
+            # actually biddable, not just rejected after the fact.
+            affordable = cp.cash + SHARE_LOAN_AMOUNT * len(cp.unencumbered_shares)
+            bid_spin.configure(to=max(1, affordable))
+            bid_var.set(min(auction["highest_bid"] + 1, max(1, affordable)))
             if cp.is_bot:
                 self.after(BOT_DELAY_MS, bot_take_turn)
 
