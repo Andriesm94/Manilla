@@ -17,6 +17,15 @@ price and charges a flat redemption cost per encumbered share, which is
 accurate enough to rank actions mid-voyage without needing to simulate the
 endgame every time.
 
+An opponent's already-placed ware-punt or pirate accomplice is valued
+against its *projected* final occupancy, not however many slots happen to
+be filled right now -- see `project_final_occupancy`: a slot splitting a
+cargo profit tends to fill up over the placement rounds since joining an
+occupied slot still beats leaving that share on the table, so this assumes
+full capacity by default and only falls back to the current count in the
+last two turns before the third (final) dice throw, when there's no
+realistic time left for another accomplice to join.
+
 A **rival** is any opponent whose estimated wealth exceeds the viewer's own;
 REV is the coin gap to a specific rival (`rival_wealth_est - my_wealth_est`,
 positive when they're ahead). Turning this into "pick the action that best
@@ -59,19 +68,60 @@ def _rounds_remaining(state: GameState) -> int:
     return state.movement_rounds_total - state.movement_round_index
 
 
+def _turns_remaining_in_final_accomplice_round(state: GameState):
+    """How many accomplice-placement turns remain this round, counting the
+    about-to-act player's own turn -- but only meaningful, so only
+    returned, in the round immediately preceding the third (final)
+    movement roll: accomplice rounds and dice rolls interleave one-for-one
+    (`BoardSetupApp._advance_turn` rolls dice the moment a round's
+    placements finish), so that's the one round after which no further
+    placement opportunity exists at all before the voyage resolves. Each
+    round restarts the rotation at the harbor master
+    (`BoardSetupApp._finish_round_end_roll`), so position-in-rotation is
+    recoverable from `current_turn_player_id` alone. Returns None outside
+    that round or the accomplice-placement phase -- there's a whole extra
+    round (or more) still ahead, plenty of time for a slot to fill."""
+    if state.phase != Phase.ACCOMPLICE_ROUND or state.movement_round_index != 2 or not state.players:
+        return None
+    order = state.players
+    harbor_master = next((p for p in order if p.is_harbor_master), order[0])
+    current_player = state.player_by_id(state.current_turn_player_id) or harbor_master
+    if current_player not in order:
+        current_player = harbor_master
+    position = (order.index(current_player) - order.index(harbor_master)) % len(order)
+    return len(order) - position
+
+
+def project_final_occupancy(state: GameState, current_occupied: int, max_slots: int) -> int:
+    """How many accomplices a ware punt or the pirate boat is projected to
+    end up with once the voyage resolves. Defaults to full capacity --
+    a slot splitting a cargo profit tends to fill up over the placement
+    rounds, since joining an already-occupied slot still beats leaving that
+    share on the table -- except in the last two turns before the third
+    (final) dice throw, where so little placement time remains that
+    whatever is occupied right now is assumed to be final."""
+    turns_left = _turns_remaining_in_final_accomplice_round(state)
+    if turns_left is not None and turns_left <= 2:
+        return current_occupied
+    return max_slots
+
+
 def _ware_slot_gross_per_accomplice(state: GameState, punt, p_safe_if_caught: Numeric) -> Fraction:
     """Gross expected payout *per occupied slot* on a ware punt -- what one
     accomplice on it is owed, given its punt's real status: certain if
     already docked in port, zero if shipwrecked or captured (ware profit
-    never pays out there), and probabilistic while still at sea. Callers
-    multiply by how many of those slots a specific player holds."""
+    never pays out there), and otherwise probabilistic, valued against the
+    *projected* final occupancy (see `project_final_occupancy`) rather than
+    however many slots happen to be filled right now. Callers multiply by
+    how many of those slots a specific player holds."""
     occupied = sum(1 for s in punt.ware_slots if s.occupant is not None)
     if punt.status == PuntStatus.IN_PORT:
         return Fraction(PLUNDER_PAYOUTS.get(punt.ware, 0) // max(1, occupied))
     if punt.status in (PuntStatus.IN_SHIPYARD, PuntStatus.CAPTURED):
         return Fraction(0)
+    projected = project_final_occupancy(state, occupied, len(punt.ware_slots))
     return ware_slot_expected_payout(
-        punt.ware, punt.position, _rounds_remaining(state), max(1, occupied), p_safe_if_caught
+        punt.ware, punt.position, _rounds_remaining(state), max(1, projected), p_safe_if_caught
     )
 
 
@@ -127,7 +177,8 @@ def expected_accomplice_return(state: GameState, player_id: str, p_safe_if_caugh
 
     pirate_ids = {"captain": state.pirate_boat.captain.occupant, "second": state.pirate_boat.second.occupant}
     if player_id in pirate_ids.values():
-        pirate_count = sum(1 for v in pirate_ids.values() if v is not None)
+        current_pirate_count = sum(1 for v in pirate_ids.values() if v is not None)
+        pirate_count = project_final_occupancy(state, current_pirate_count, max_slots=2)
         punts = [
             (p.ware, p.position, _rounds_remaining(state))
             for p in state.punts

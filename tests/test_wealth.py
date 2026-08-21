@@ -26,6 +26,7 @@ from manilla.engine.wealth import (
     encumbered_penalty,
     expected_accomplice_return,
     identify_rivals,
+    project_final_occupancy,
     rev,
     rev_adjusted_score,
     wealth_estimate,
@@ -36,7 +37,9 @@ def _make_state():
     state = GameState.new_default_game(["Me", "P1", "P2"])
     for p in state.players:
         p.shares = []
+    state.players[0].is_harbor_master = True
     state.phase = Phase.ACCOMPLICE_ROUND
+    state.current_turn_player_id = "p0"
     state.movement_round_index = 0  # 3 movement rounds still ahead
     return state
 
@@ -85,18 +88,55 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         state.pirate_boat.captain.occupant = "p0"
         return state
 
-    def test_on_route_ware_slot_matches_the_underlying_ev_function(self):
+    def test_on_route_ware_slot_projects_full_occupancy_by_default(self):
+        # Only p1 has actually claimed a slot so far, but with a whole
+        # movement round still ahead (movement_round_index=0, well short of
+        # the final round), the punt's other two ginseng slots are assumed
+        # to fill before the voyage resolves -- so the payout is valued as
+        # if split 3 ways, not kept whole for p1 alone.
         state = self._rigged_state()
-        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 3, accomplices_on_punt=1)
+        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 3, accomplices_on_punt=3)
         self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
     def test_docked_ware_slot_pays_out_with_certainty(self):
         state = self._rigged_state()
         # Silk punt already in port: certain payout, no dice math needed --
-        # 30 (silk's plunder payout) split across its 1 occupied slot, plus
-        # p0's pirate captaincy over the two punts still at sea.
+        # 30 (silk's plunder payout) split across its 1 occupied slot
+        # (already resolved, not projected). p0's pirate captaincy is still
+        # projected to end up shared with a second pirate, though.
         pirate_part = pirate_expected_payout(
-            [(Ware.GINSENG, 8, 3), (Ware.NUTMEG, 5, 3)], pirate_count=1
+            [(Ware.GINSENG, 8, 3), (Ware.NUTMEG, 5, 3)], pirate_count=2
+        )
+        self.assertEqual(expected_accomplice_return(state, "p0"), Fraction(30) + pirate_part)
+
+    def test_last_two_turns_of_the_final_round_use_actual_occupancy(self):
+        state = self._rigged_state()
+        state.movement_round_index = 2  # about to trigger the third dice throw -- 1 round left
+        state.current_turn_player_id = "p2"  # last of 3 players in this round's rotation
+        # No more placement chances remain -- p1's slot is valued alone.
+        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1)
+        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
+
+    def test_early_in_the_final_round_still_projects_full_occupancy(self):
+        state = self._rigged_state()
+        state.movement_round_index = 2
+        state.current_turn_player_id = "p0"  # harbor master, first to act -- 3 turns still remain
+        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=3)
+        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
+
+    def test_exactly_two_turns_remaining_is_the_boundary(self):
+        state = self._rigged_state()
+        state.movement_round_index = 2
+        state.current_turn_player_id = "p1"  # 2nd of 3 -- exactly 2 turns remain, including this one
+        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1)
+        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
+
+    def test_pirate_boat_projection_also_respects_the_last_two_turns(self):
+        state = self._rigged_state()
+        state.movement_round_index = 2
+        state.current_turn_player_id = "p2"  # last turn of the round
+        pirate_part = pirate_expected_payout(
+            [(Ware.GINSENG, 8, 1), (Ware.NUTMEG, 5, 1)], pirate_count=1
         )
         self.assertEqual(expected_accomplice_return(state, "p0"), Fraction(30) + pirate_part)
 
@@ -120,6 +160,35 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
     def test_player_with_no_slots_gets_zero(self):
         state = self._rigged_state()
         self.assertEqual(expected_accomplice_return(state, "nobody"), 0)
+
+
+class TestProjectFinalOccupancy(unittest.TestCase):
+    def test_defaults_to_full_capacity_outside_the_final_round(self):
+        state = _make_state()
+        state.movement_round_index = 0
+        self.assertEqual(project_final_occupancy(state, current_occupied=1, max_slots=4), 4)
+
+    def test_defaults_to_full_capacity_early_in_the_final_round(self):
+        state = _make_state()
+        state.movement_round_index = 2
+        state.current_turn_player_id = "p0"  # harbor master, 3 turns remain
+        self.assertEqual(project_final_occupancy(state, current_occupied=1, max_slots=4), 4)
+
+    def test_uses_actual_occupancy_in_the_last_two_turns(self):
+        state = _make_state()
+        state.movement_round_index = 2
+        state.current_turn_player_id = "p2"  # last turn
+        self.assertEqual(project_final_occupancy(state, current_occupied=1, max_slots=4), 1)
+
+    def test_outside_accomplice_round_defaults_to_full_capacity(self):
+        # Placement is over for this phase already; expected_accomplice_return
+        # itself zeroes out settled phases, but the helper alone stays
+        # conservative rather than guessing.
+        state = _make_state()
+        state.phase = Phase.PROFIT_DISTRIBUTION
+        state.movement_round_index = 2
+        state.current_turn_player_id = "p2"
+        self.assertEqual(project_final_occupancy(state, current_occupied=1, max_slots=4), 4)
 
 
 class TestWealthEstimate(unittest.TestCase):
