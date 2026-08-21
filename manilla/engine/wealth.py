@@ -49,18 +49,31 @@ that the moment it's observed.
 
 A **rival** is any opponent whose estimated wealth exceeds the viewer's own;
 REV is the coin gap to a specific rival (`rival_wealth_est - my_wealth_est`,
-positive when they're ahead). Turning this into "pick the action that best
-closes the largest gap" needs a per-action estimate of how that action moves
-each side's wealth -- `rev_adjusted_score` is the composable primitive for
-that once a caller has both deltas; wiring it into specific decision points
-(which ware's black-market price to raise as harbor master, which punt to
-send pirates after) is follow-up work, not done here.
+positive when they're ahead). `action_impact` turns this into "pick the
+action that best closes the gap to every current rival at once": it
+simulates a candidate action (any caller-supplied `GameState` mutation, from
+placing a pirate to a pilot's nudge) and reports how it moves your own
+wealth and every current rival's, plus the total post-action REV summed
+across them (`sum(rival_wealth_after - my_wealth_after)`, per the user's
+own formula) -- the smaller that total, the better the action is for your
+standing against the field, not just for your own raw EV.
+
+An action doesn't only change the acting player's own numbers. Placing a
+pirate makes every currently-loaded punt genuinely vulnerable to plunder
+(`pirate_threat`), which cuts into whichever opponents hold ware-punt
+accomplices there; nudging a punt's position with a pilot shifts its
+arrival odds for whoever holds accomplices on *that* punt. `p_safe_if_caught`
+now defaults to `None` everywhere in this module, meaning "derive it from
+whether the pirate boat is actually occupied" rather than a flat assumed
+constant -- callers can still pass an explicit value for a counterfactual
+("what if I ignore pirates"), but the default reflects the real board.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import List
+from typing import Callable, Dict, List, Optional
 
 from manilla.engine.beliefs import ShareBeliefs, share_value_estimate
 from manilla.engine.expected_value import (
@@ -71,7 +84,16 @@ from manilla.engine.expected_value import (
     punt_shipyard_probability,
     ware_slot_expected_payout,
 )
-from manilla.engine.models import GameState, Phase, PLUNDER_PAYOUTS, Player, PuntStatus, SHARE_REPAY_AMOUNT
+from manilla.engine.models import (
+    GameState,
+    Phase,
+    PIRATE_PRICE,
+    PLUNDER_PAYOUTS,
+    Player,
+    PuntStatus,
+    SEA_ROUTE_LENGTH,
+    SHARE_REPAY_AMOUNT,
+)
 
 # Once a voyage reaches these phases every pending accomplice payout has
 # already been folded into players' cash (or is about to be, atomically),
@@ -83,6 +105,20 @@ def encumbered_penalty(player: Player) -> int:
     """The flat redemption cost of a player's encumbered shares -- what it
     would take to unencumber every one of them right now."""
     return SHARE_REPAY_AMOUNT * len(player.encumbered_shares)
+
+
+def pirate_threat(state: GameState) -> Fraction:
+    """The realistic `p_safe_if_caught` for the board as it actually
+    stands: 0 (certain plunder) if any pirate slot is occupied -- plunder
+    is automatic and mandatory once pirates are aboard, no board-or-skip
+    choice involved (see `expected_value`'s module docstring) -- else 1 (no
+    pirates present, so a punt caught on 13 always docks safely)."""
+    pb = state.pirate_boat
+    return Fraction(0) if (pb.captain.occupant or pb.second.occupant) else Fraction(1)
+
+
+def _resolve_p_safe(state: GameState, p_safe_if_caught: Optional[Numeric]) -> Numeric:
+    return pirate_threat(state) if p_safe_if_caught is None else p_safe_if_caught
 
 
 def _rounds_remaining(state: GameState) -> int:
@@ -169,11 +205,18 @@ def _dock_arrival_probs(state: GameState, destination: str) -> List[Numeric]:
     return probs
 
 
-def expected_accomplice_return(state: GameState, player_id: str, p_safe_if_caught: Numeric = 1) -> Fraction:
+def expected_accomplice_return(
+    state: GameState, player_id: str, p_safe_if_caught: Optional[Numeric] = None
+) -> Fraction:
     """The sum of gross expected payouts across every accomplice slot
     `player_id` currently occupies -- ware punts, port, shipyard, and the
     pirate boat -- valued gross (no price subtracted) since the price was
     already paid and is already reflected in their current cash.
+
+    `p_safe_if_caught` defaults to `None`, meaning "derive it from whether
+    the pirate boat is actually occupied" (`pirate_threat`) rather than
+    assume a fixed value -- pass an explicit override only for a
+    counterfactual.
 
     Returns 0 once the voyage has settled (`_SETTLED_PHASES`), since by then
     every pending payout is already in players' cash rather than still
@@ -182,6 +225,7 @@ def expected_accomplice_return(state: GameState, player_id: str, p_safe_if_caugh
     if state.phase in _SETTLED_PHASES:
         return Fraction(0)
 
+    p_safe_if_caught = _resolve_p_safe(state, p_safe_if_caught)
     total = Fraction(0)
 
     for punt in state.punts:
@@ -214,7 +258,7 @@ def expected_accomplice_return(state: GameState, player_id: str, p_safe_if_caugh
 
 
 def wealth_estimate(
-    state: GameState, beliefs: ShareBeliefs, player_id: str, p_safe_if_caught: Numeric = 1
+    state: GameState, beliefs: ShareBeliefs, player_id: str, p_safe_if_caught: Optional[Numeric] = None
 ) -> Fraction:
     """`beliefs.viewer_id`'s best estimate of `player_id`'s total wealth --
     exact when `player_id == beliefs.viewer_id`, since a player always knows
@@ -232,7 +276,7 @@ def wealth_estimate(
 
 
 def identify_rivals(
-    state: GameState, beliefs: ShareBeliefs, my_id: str, p_safe_if_caught: Numeric = 1
+    state: GameState, beliefs: ShareBeliefs, my_id: str, p_safe_if_caught: Optional[Numeric] = None
 ) -> List[str]:
     """Every opponent `beliefs.viewer_id` (== `my_id`) estimates to be
     wealthier than themselves right now, ordered richest first."""
@@ -247,7 +291,13 @@ def identify_rivals(
     return [pid for pid, _ in rivals]
 
 
-def rev(state: GameState, beliefs: ShareBeliefs, my_id: str, rival_id: str, p_safe_if_caught: Numeric = 1) -> Fraction:
+def rev(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    rival_id: str,
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> Fraction:
     """Relative Expected Value: the coin gap between a specific rival and
     `my_id`, positive while the rival is still ahead. Can go negative --
     that just means this "rival" no longer is one."""
@@ -267,3 +317,106 @@ def rev_adjusted_score(my_ev_gain: Numeric, rival_ev_gain: Numeric = 0) -> Fract
     my_gain = my_ev_gain if isinstance(my_ev_gain, Fraction) else Fraction(my_ev_gain)
     rival_gain = rival_ev_gain if isinstance(rival_ev_gain, Fraction) else Fraction(rival_ev_gain)
     return my_gain - rival_gain
+
+
+@dataclass
+class ActionImpact:
+    """What a candidate action does to `my_id` and to every current rival,
+    per `action_impact`."""
+
+    my_gain: Fraction
+    rival_gains: Dict[str, Fraction] = field(default_factory=dict)
+    total_rev_after: Fraction = Fraction(0)
+
+
+def action_impact(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    apply_action: Callable[[GameState], None],
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> ActionImpact:
+    """Simulate taking `apply_action` and report how it moves everyone's
+    estimated wealth.
+
+    Rivals are identified once, from the board as it stands *before* the
+    action (they're who you're actually trying to get ahead of right now).
+    `apply_action` receives a full copy of `state` (a real
+    `GameState.from_dict(state.to_dict())` clone, so mutating it never
+    touches the original) and should mutate it to represent the action --
+    e.g. occupying a slot and deducting its price. `wealth_estimate` is
+    then recomputed for `my_id` and every one of those rivals against the
+    mutated copy.
+
+    `total_rev_after` is `sum(rival_wealth_after - my_wealth_after)` over
+    that same rival set -- the user's own formula for "advantage over the
+    field": the action that *minimizes* this is the one that most narrows
+    (or best reverses) your combined gap to everyone currently ahead of
+    you, which is not always the same action that maximizes your own raw
+    EV gain (`my_gain`) -- an action that helps you a little while hurting
+    a rival a lot can score better here than one that helps you more but
+    leaves every rival untouched.
+    """
+    rivals = identify_rivals(state, beliefs, my_id, p_safe_if_caught)
+    my_before = wealth_estimate(state, beliefs, my_id, p_safe_if_caught)
+    rival_before = {r: wealth_estimate(state, beliefs, r, p_safe_if_caught) for r in rivals}
+
+    after = GameState.from_dict(state.to_dict())
+    apply_action(after)
+
+    my_after = wealth_estimate(after, beliefs, my_id, p_safe_if_caught)
+    rival_gains: Dict[str, Fraction] = {}
+    total_rev_after = Fraction(0)
+    for r in rivals:
+        w_after = wealth_estimate(after, beliefs, r, p_safe_if_caught)
+        rival_gains[r] = w_after - rival_before[r]
+        total_rev_after += w_after - my_after
+
+    return ActionImpact(my_gain=my_after - my_before, rival_gains=rival_gains, total_rev_after=total_rev_after)
+
+
+def apply_pirate_placement(role: str, player_id: str) -> Callable[[GameState], None]:
+    """Build an `action_impact` mutator for placing `player_id` on the
+    pirate boat's `role` ('captain' or 'second') slot, paying PIRATE_PRICE.
+    This alone is often enough to make `pirate_threat` flip from 1 to 0 for
+    every other player's wealth estimate -- placing the *first* pirate is
+    what newly endangers everyone's ware-punt accomplices, not specifically
+    the second."""
+    if role not in ("captain", "second"):
+        raise ValueError(f"role must be 'captain' or 'second', got {role!r}")
+
+    def _apply(state: GameState) -> None:
+        slot = state.pirate_boat.captain if role == "captain" else state.pirate_boat.second
+        slot.occupant = player_id
+        player = state.player_by_id(player_id)
+        if player is not None:
+            player.cash -= PIRATE_PRICE
+
+    return _apply
+
+
+def apply_pilot_move(punt_id: int, delta: int) -> Callable[[GameState], None]:
+    """Build an `action_impact` mutator applying a pilot's positional nudge
+    to punt `punt_id` by `delta` spaces, matching
+    `BoardSetupApp._apply_pilot_move`'s clamp-at-0 and
+    overshoot-docks-immediately rules (a small pilot moves one punt by
+    ±1, a large pilot moves one punt by ±2 or two punts by ±1 each -- call
+    this once per punt moved). No-ops if the punt isn't `ON_ROUTE`. Doesn't
+    charge a price: piloting is a privilege of an already-placed (and
+    already-paid-for) pilot accomplice, not a separate payment per move.
+    This only reproduces what wealth estimation actually reads (position
+    and status) -- it doesn't assign a port/shipyard dock_slot letter on
+    overshoot, since no wealth calculation depends on which letter a punt
+    ends up docked at, only on whether it did.
+    """
+
+    def _apply(state: GameState) -> None:
+        punt = next((p for p in state.punts if p.id == punt_id), None)
+        if punt is None or punt.status != PuntStatus.ON_ROUTE:
+            return
+        punt.position = max(0, punt.position + delta)
+        if punt.position > SEA_ROUTE_LENGTH:
+            punt.status = PuntStatus.IN_PORT
+            punt.position = SEA_ROUTE_LENGTH
+
+    return _apply

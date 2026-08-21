@@ -9,7 +9,6 @@ from manilla.engine.models import (
     AccompliceSlot,
     GameState,
     Phase,
-    Punt,
     PuntStatus,
     SHARE_REPAY_AMOUNT,
     Share,
@@ -23,9 +22,13 @@ from manilla.engine.expected_value import (
     ware_slot_expected_payout,
 )
 from manilla.engine.wealth import (
+    action_impact,
+    apply_pilot_move,
+    apply_pirate_placement,
     encumbered_penalty,
     expected_accomplice_return,
     identify_rivals,
+    pirate_threat,
     project_final_occupancy,
     rev,
     rev_adjusted_score,
@@ -93,9 +96,11 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         # movement round still ahead (movement_round_index=0, well short of
         # the final round), the punt's other two ginseng slots are assumed
         # to fill before the voyage resolves -- so the payout is valued as
-        # if split 3 ways, not kept whole for p1 alone.
+        # if split 3 ways, not kept whole for p1 alone. p0's pirate
+        # captaincy (set up by _rigged_state) makes p_safe_if_caught auto-
+        # derive to 0 -- plunder is certain if this punt gets caught on 13.
         state = self._rigged_state()
-        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 3, accomplices_on_punt=3)
+        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 3, accomplices_on_punt=3, p_safe_if_caught=0)
         self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
     def test_docked_ware_slot_pays_out_with_certainty(self):
@@ -148,21 +153,21 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         state.movement_round_index = 2  # about to trigger the third dice throw -- 1 round left
         state.current_turn_player_id = "p2"  # last of 3 players in this round's rotation
         # No more placement chances remain -- p1's slot is valued alone.
-        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1)
+        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1, p_safe_if_caught=0)
         self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
     def test_early_in_the_final_round_still_projects_full_occupancy(self):
         state = self._rigged_state()
         state.movement_round_index = 2
         state.current_turn_player_id = "p0"  # harbor master, first to act -- 3 turns still remain
-        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=3)
+        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=3, p_safe_if_caught=0)
         self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
     def test_exactly_two_turns_remaining_is_the_boundary(self):
         state = self._rigged_state()
         state.movement_round_index = 2
         state.current_turn_player_id = "p1"  # 2nd of 3 -- exactly 2 turns remain, including this one
-        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1)
+        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1, p_safe_if_caught=0)
         self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
     def test_pirate_valuation_is_unaffected_by_the_last_two_turns_rule(self):
@@ -295,6 +300,174 @@ class TestRevAdjustedScore(unittest.TestCase):
 
     def test_hurting_a_rival_adds_to_the_score(self):
         self.assertEqual(rev_adjusted_score(10, -4), 14)
+
+
+class TestPirateThreat(unittest.TestCase):
+    def test_no_pirates_is_safe(self):
+        state = _make_state()
+        self.assertEqual(pirate_threat(state), 1)
+
+    def test_captain_alone_makes_it_certain_plunder(self):
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p0"
+        self.assertEqual(pirate_threat(state), 0)
+
+    def test_second_alone_also_makes_it_certain_plunder(self):
+        state = _make_state()
+        state.pirate_boat.second.occupant = "p1"
+        self.assertEqual(pirate_threat(state), 0)
+
+
+class TestExpectedAccompliceReturnAutoDerivesPirateThreat(unittest.TestCase):
+    def test_p_safe_if_caught_defaults_to_the_real_pirate_presence(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 8
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [AccompliceSlot(price=1, occupant="p1")] * 1 + [
+            AccompliceSlot(price=2),
+            AccompliceSlot(price=3),
+        ]
+
+        safe = expected_accomplice_return(state, "p1")
+        state.pirate_boat.captain.occupant = "p0"
+        endangered = expected_accomplice_return(state, "p1")
+        self.assertLess(endangered, safe)
+        self.assertEqual(endangered, ware_slot_expected_payout(Ware.GINSENG, 8, 3, 3, p_safe_if_caught=0))
+
+    def test_explicit_override_still_wins_over_auto_derivation(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 8
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [AccompliceSlot(price=1, occupant="p1"), AccompliceSlot(price=2), AccompliceSlot(price=3)]
+        state.pirate_boat.captain.occupant = "p0"  # real threat exists...
+
+        # ...but an explicit override is still honored, e.g. for a
+        # counterfactual "what if I ignore pirate risk" comparison.
+        forced_safe = expected_accomplice_return(state, "p1", p_safe_if_caught=1)
+        self.assertEqual(forced_safe, ware_slot_expected_payout(Ware.GINSENG, 8, 3, 3, p_safe_if_caught=1))
+
+
+class TestActionImpact(unittest.TestCase):
+    def _state_with_rival(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 8
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [
+            AccompliceSlot(price=1, occupant="p1"),
+            AccompliceSlot(price=2),
+            AccompliceSlot(price=3),
+        ]
+        state.players[1].cash = 500  # guarantee p1 counts as a rival
+        return state
+
+    def test_does_not_mutate_the_original_state(self):
+        state = self._state_with_rival()
+        beliefs = infer_beliefs(state, "p0")
+        action_impact(state, beliefs, "p0", apply_pirate_placement("captain", "p0"))
+        self.assertIsNone(state.pirate_boat.captain.occupant)
+        self.assertEqual(state.players[0].cash, 30)
+
+    def test_no_op_action_gives_zero_gains(self):
+        state = self._state_with_rival()
+        beliefs = infer_beliefs(state, "p0")
+        impact = action_impact(state, beliefs, "p0", lambda s: None)
+        self.assertEqual(impact.my_gain, 0)
+        self.assertEqual(impact.rival_gains, {"p1": Fraction(0)})
+        self.assertEqual(impact.total_rev_after, rev(state, beliefs, "p0", "p1"))
+
+    def test_taking_a_pirate_slot_hurts_a_rivals_endangered_ware_accomplice(self):
+        # p1's ginseng accomplice goes from "safe if caught" to "certain
+        # plunder" the moment p0 becomes captain -- a real, negative effect
+        # on a rival caused by an action that isn't p1's own.
+        state = self._state_with_rival()
+        beliefs = infer_beliefs(state, "p0")
+        impact = action_impact(state, beliefs, "p0", apply_pirate_placement("captain", "p0"))
+        self.assertLess(impact.rival_gains["p1"], 0)
+
+    def test_total_rev_after_matches_the_users_formula(self):
+        state = self._state_with_rival()
+        state.players[2].cash = 400  # p2 is a rival too
+        beliefs = infer_beliefs(state, "p0")
+        impact = action_impact(state, beliefs, "p0", apply_pirate_placement("captain", "p0"))
+
+        after = GameState.from_dict(state.to_dict())
+        apply_pirate_placement("captain", "p0")(after)
+        expected_total = sum(
+            wealth_estimate(after, beliefs, r) - wealth_estimate(after, beliefs, "p0") for r in ("p1", "p2")
+        )
+        self.assertEqual(impact.total_rev_after, expected_total)
+
+    def test_rivals_are_fixed_from_before_the_action(self):
+        # p1 stops being a rival once the action lands (their punt's value
+        # craters), but they were a rival *before* the action, so they
+        # still count in total_rev_after.
+        state = self._state_with_rival()
+        beliefs = infer_beliefs(state, "p0")
+        rivals_before = identify_rivals(state, beliefs, "p0")
+        self.assertIn("p1", rivals_before)
+
+        impact = action_impact(state, beliefs, "p0", apply_pirate_placement("captain", "p0"))
+        self.assertIn("p1", impact.rival_gains)
+
+
+class TestApplyPiratePlacement(unittest.TestCase):
+    def test_occupies_the_slot_and_deducts_the_price(self):
+        state = _make_state()
+        apply_pirate_placement("captain", "p0")(state)
+        self.assertEqual(state.pirate_boat.captain.occupant, "p0")
+        self.assertEqual(state.players[0].cash, 30 - 5)
+
+    def test_second_slot(self):
+        state = _make_state()
+        apply_pirate_placement("second", "p1")(state)
+        self.assertEqual(state.pirate_boat.second.occupant, "p1")
+        self.assertIsNone(state.pirate_boat.captain.occupant)
+
+    def test_rejects_unknown_role(self):
+        with self.assertRaises(ValueError):
+            apply_pirate_placement("first-mate", "p0")
+
+
+class TestApplyPilotMove(unittest.TestCase):
+    def test_moves_an_on_route_punt(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 5
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        apply_pilot_move(0, 2)(state)
+        self.assertEqual(state.punts[0].position, 7)
+
+    def test_clamps_at_zero(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 1
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        apply_pilot_move(0, -5)(state)
+        self.assertEqual(state.punts[0].position, 0)
+
+    def test_overshoot_docks_immediately(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 12
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        apply_pilot_move(0, 2)(state)
+        self.assertEqual(state.punts[0].status, PuntStatus.IN_PORT)
+        self.assertEqual(state.punts[0].position, 13)
+
+    def test_ignores_a_punt_not_on_route(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 5
+        state.punts[0].status = PuntStatus.IN_SHIPYARD
+        apply_pilot_move(0, 2)(state)
+        self.assertEqual(state.punts[0].position, 5)
+
+    def test_ignores_an_unknown_punt_id(self):
+        state = _make_state()
+        apply_pilot_move(99, 2)(state)  # should not raise
 
 
 if __name__ == "__main__":
