@@ -19,7 +19,6 @@ from manilla.engine.beliefs import infer_beliefs
 from manilla.engine.expected_value import (
     dock_slot_expected_payout,
     pirate_expected_payout,
-    pirate_slot_ev,
     punt_port_probability,
     ware_slot_expected_payout,
 )
@@ -103,54 +102,46 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         state = self._rigged_state()
         # Silk punt already in port: certain payout, no dice math needed --
         # 30 (silk's plunder payout) split across its 1 occupied slot
-        # (already resolved, not projected). p0's pirate captaincy stays
-        # solo: a 2-way split of these two punts' plunder isn't worth
-        # PIRATE_PRICE (checked directly, not assumed), so no second
-        # pirate is projected to board.
-        punts = [(Ware.GINSENG, 8, 3), (Ware.NUTMEG, 5, 3)]
-        self.assertLess(pirate_slot_ev(punts, 2), 0)
-        pirate_part = pirate_expected_payout(punts, pirate_count=1)
+        # (already resolved, not projected). p0's lone pirate captaincy is
+        # valued using exactly the 1 pirate actually aboard -- no
+        # projection, see test_pirate_valuation_never_projects_occupancy.
+        pirate_part = pirate_expected_payout(
+            [(Ware.GINSENG, 8, 3), (Ware.NUTMEG, 5, 3)], pirate_count=1
+        )
         self.assertEqual(expected_accomplice_return(state, "p0"), Fraction(30) + pirate_part)
 
-    def _pirates_only_state(self, punts, movement_round_index):
-        """A minimal fixture isolating the pirate branch of
-        expected_accomplice_return: `punts` loaded and on-route, p0 as the
-        lone pirate captain, nothing else occupied (no ware/dock slots), so
-        the whole return comes from piracy alone."""
+    def test_pirate_valuation_never_projects_occupancy(self):
+        # Unlike ware punts, the pirate boat gets no occupancy projection at
+        # all -- a lone captain is valued as exactly 1 pirate regardless of
+        # how profitable (or not) a hypothetical 2-way split would be, and
+        # regardless of how many rounds or turns remain.
         state = _make_state()
-        state.movement_round_index = movement_round_index
-        for punt, (ware, position) in zip(state.punts, punts):
-            punt.ware = ware
-            punt.position = position
-            punt.status = PuntStatus.ON_ROUTE
+        state.punts[0].ware = Ware.JADE
+        state.punts[0].position = 6
+        state.punts[0].status = PuntStatus.ON_ROUTE
         state.pirate_boat.captain.occupant = "p0"
-        return state
 
-    def test_pirate_stays_solo_when_a_2way_split_would_lose_money(self):
-        # A second pirate only boards if splitting the loot two ways still
-        # clears PIRATE_PRICE for them -- solo pays (EV=1), shared doesn't
-        # (EV=-2), so a lone captain should be valued as staying solo, not
-        # discounted as if a second pirate were coming.
-        punts = [(Ware.JADE, 6)]
-        state = self._pirates_only_state(punts, movement_round_index=1)  # 2 rounds remain
-        triples = [(Ware.JADE, 6, 2)]
-        self.assertGreaterEqual(pirate_slot_ev(triples, 1), 0)
-        self.assertLess(pirate_slot_ev(triples, 2), 0)
+        for movement_round_index in (0, 1, 2):
+            with self.subTest(movement_round_index=movement_round_index):
+                state.movement_round_index = movement_round_index
+                expected = pirate_expected_payout(
+                    [(Ware.JADE, 6, 3 - movement_round_index)], pirate_count=1
+                )
+                self.assertEqual(expected_accomplice_return(state, "p0"), expected)
 
-        expected = pirate_expected_payout(triples, pirate_count=1)
+    def test_pirate_valuation_uses_current_count_when_two_are_aboard(self):
+        # Two pirates actually aboard is a fact, not a projection -- the
+        # split is valued as 2-way regardless of profitability or timing.
+        state = _make_state()
+        state.punts[0].ware = Ware.JADE
+        state.punts[0].position = 6
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.pirate_boat.captain.occupant = "p0"
+        state.pirate_boat.second.occupant = "p1"
+
+        expected = pirate_expected_payout([(Ware.JADE, 6, 3)], pirate_count=2)
         self.assertEqual(expected_accomplice_return(state, "p0"), expected)
-
-    def test_pirate_projects_a_second_when_a_2way_split_still_pays(self):
-        # Three distinct loaded punts (a realistic voyage -- one ware left
-        # ashore) whose combined plunder still clears PIRATE_PRICE even
-        # split two ways.
-        punts = [(Ware.NUTMEG, 6), (Ware.SILK, 6), (Ware.JADE, 6)]
-        state = self._pirates_only_state(punts, movement_round_index=1)  # 2 rounds remain
-        triples = [(w, p, 2) for w, p in punts]
-        self.assertGreaterEqual(pirate_slot_ev(triples, 2), 0)
-
-        expected = pirate_expected_payout(triples, pirate_count=2)
-        self.assertEqual(expected_accomplice_return(state, "p0"), expected)
+        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
     def test_last_two_turns_of_the_final_round_use_actual_occupancy(self):
         state = self._rigged_state()
@@ -174,7 +165,10 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1)
         self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
-    def test_pirate_boat_projection_also_respects_the_last_two_turns(self):
+    def test_pirate_valuation_is_unaffected_by_the_last_two_turns_rule(self):
+        # The last-two-turns exception is a ware-punt-only concept (see
+        # project_final_occupancy) -- pirates don't have a growth
+        # projection to fall back from in the first place.
         state = self._rigged_state()
         state.movement_round_index = 2
         state.current_turn_player_id = "p2"  # last turn of the round

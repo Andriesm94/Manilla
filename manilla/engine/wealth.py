@@ -39,13 +39,13 @@ slot scarcity, not the EV formula, are what decide who actually claims
 which slot once a punt is genuinely worth joining at any point in its fill
 sequence.
 
-The pirate boat is deliberately valued differently (`_project_pirate_count`,
-not `project_final_occupancy`): with only two possible slots, "will a
-second pirate board" has an exact answer rather than a capacity worth
-assuming -- they only will if a 2-way split still clears PIRATE_PRICE for
-them. Assuming full capacity there regardless would undervalue a pirate
-opportunity that's genuinely worth taking solo but not worth sharing, since
-no rational second pirate actually boards a split that loses them money.
+The pirate boat gets no such projection: its occupancy is valued exactly as
+it stands right now, whether that's 0, 1, or 2 pirates. Whether a second
+pirate eventually boards is entirely their own future call, made with their
+own up-to-date numbers at the time -- not something worth guessing at here.
+`expected_accomplice_return` recomputes fresh from the live state every
+call, so if a second pirate does join later, the estimate simply reflects
+that the moment it's observed.
 
 A **rival** is any opponent whose estimated wealth exceeds the viewer's own;
 REV is the coin gap to a specific rival (`rival_wealth_est - my_wealth_est`,
@@ -67,7 +67,6 @@ from manilla.engine.expected_value import (
     Numeric,
     dock_slot_expected_payout,
     pirate_expected_payout,
-    pirate_slot_ev,
     punt_port_probability,
     punt_shipyard_probability,
     ware_slot_expected_payout,
@@ -123,37 +122,13 @@ def project_final_occupancy(state: GameState, current_occupied: int, max_slots: 
     so little placement time remains that whatever is occupied right now is
     assumed to be final.
 
-    Pirates don't use this (see `_project_pirate_count`): with only two
-    possible slots, whether a second pirate boards has one direct answer --
-    they only join if a 2-way split is still worth it to them -- so there's
-    an exact check to make rather than a capacity to assume.
+    Pirates don't use this -- see the module docstring: their occupancy is
+    valued as-is, with no projection at all.
     """
     turns_left = _turns_remaining_in_final_accomplice_round(state)
     if turns_left is not None and turns_left <= 2:
         return current_occupied
     return max_slots
-
-
-def _project_pirate_count(state: GameState, current_pirate_count: int, punts) -> int:
-    """How many pirates the boat is projected to end up with. Unlike a ware
-    punt's `project_final_occupancy`, this doesn't need to assume full
-    capacity and hope it holds up: with only two possible slots, a second
-    pirate's own decision is the exact answer to whether they board at all
-    -- they will, if and only if splitting every qualifying punt's plunder
-    two ways is still worth PIRATE_PRICE to them (`pirate_slot_ev(punts,
-    2)`). That's a fact to check, not a growth pattern to project, so a
-    solo-but-not-shareable pirate opportunity is correctly valued as
-    staying solo rather than being discounted as if a second were coming.
-    Still respects the last-two-turns exception: even a profitable second
-    boarding needs a placement turn left to actually happen in."""
-    if current_pirate_count >= 2:
-        return 2
-    turns_left = _turns_remaining_in_final_accomplice_round(state)
-    if turns_left is not None and turns_left <= 2:
-        return current_pirate_count
-    if pirate_slot_ev(punts, 2) >= 0:
-        return 2
-    return max(1, current_pirate_count)
 
 
 def _ware_slot_gross_per_accomplice(state: GameState, punt, p_safe_if_caught: Numeric) -> Fraction:
@@ -233,8 +208,7 @@ def expected_accomplice_return(state: GameState, player_id: str, p_safe_if_caugh
             for p in state.punts
             if p.ware is not None and p.status == PuntStatus.ON_ROUTE
         ]
-        pirate_count = _project_pirate_count(state, current_pirate_count, punts)
-        total += pirate_expected_payout(punts, pirate_count)
+        total += pirate_expected_payout(punts, current_pirate_count)
 
     return total
 
