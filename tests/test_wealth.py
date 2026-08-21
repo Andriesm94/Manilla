@@ -14,7 +14,7 @@ from manilla.engine.models import (
     Share,
     Ware,
 )
-from manilla.engine.beliefs import infer_beliefs
+from manilla.engine.beliefs import ShareSignal, infer_beliefs
 from manilla.engine.expected_value import (
     dock_slot_expected_payout,
     pirate_expected_payout,
@@ -29,13 +29,16 @@ from manilla.engine.wealth import (
     encumbered_penalty,
     expected_accomplice_return,
     identify_rivals,
+    occupied_pilot_slots,
     pilot_move_candidates,
     pilot_slot_value,
     pirate_threat,
+    predict_pilot_move,
     project_final_occupancy,
     rev,
     rev_adjusted_score,
     wealth_estimate,
+    with_predicted_pilot_moves,
 )
 
 
@@ -559,6 +562,158 @@ class TestBestPilotMoveAndPilotSlotValue(unittest.TestCase):
         value_early = pilot_slot_value(early, infer_beliefs(early, "p0"), "p0", "small")
         value_late = pilot_slot_value(late, infer_beliefs(late, "p0"), "p0", "small")
         self.assertNotEqual(value_early, value_late)
+
+
+class TestOccupiedPilotSlots(unittest.TestCase):
+    def test_empty_when_nothing_occupied(self):
+        state = _make_state()
+        self.assertEqual(occupied_pilot_slots(state), [])
+
+    def test_small_only(self):
+        state = _make_state()
+        state.pilot_island.small.occupant = "p1"
+        self.assertEqual(occupied_pilot_slots(state), [("small", "p1")])
+
+    def test_large_only(self):
+        state = _make_state()
+        state.pilot_island.large.occupant = "p2"
+        self.assertEqual(occupied_pilot_slots(state), [("large", "p2")])
+
+    def test_both_lists_small_before_large(self):
+        state = _make_state()
+        state.pilot_island.small.occupant = "p1"
+        state.pilot_island.large.occupant = "p2"
+        self.assertEqual(occupied_pilot_slots(state), [("small", "p1"), ("large", "p2")])
+
+
+class TestPredictPilotMove(unittest.TestCase):
+    def _state_where_p1_pilots_and_p2_is_p1s_rival(self, position=11):
+        # p2 holds a ginseng accomplice; p2 is wealthy enough to be p1's
+        # rival (not necessarily p0's -- p0 is a bystander here, cash 30).
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = position
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [
+            AccompliceSlot(price=1, occupant="p2"),
+            AccompliceSlot(price=2),
+            AccompliceSlot(price=3),
+        ]
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        state.movement_round_index = 2
+        state.pilot_island.small.occupant = "p1"
+        state.players[2].cash = 500  # p2 is p1's rival, not necessarily p0's
+        return state
+
+    def test_matches_best_pilot_move_run_as_the_pilot_holder(self):
+        state = self._state_where_p1_pilots_and_p2_is_p1s_rival()
+        predicted = predict_pilot_move(state, "p1", "small")
+
+        pilot_beliefs = infer_beliefs(state, "p1")
+        expected_action, _ = best_pilot_move(state, pilot_beliefs, "p1", "small")
+
+        after_predicted = GameState.from_dict(state.to_dict())
+        predicted(after_predicted)
+        after_expected = GameState.from_dict(state.to_dict())
+        expected_action(after_expected)
+        self.assertEqual(after_predicted.punts[0].position, after_expected.punts[0].position)
+
+    def test_reflects_the_pilots_own_rival_not_the_predictors(self):
+        # p1 (the pilot) sees p2 as a rival and should push p2's punt
+        # backward -- regardless of who's asking, since the prediction is
+        # always computed from p1's own point of view.
+        state = self._state_where_p1_pilots_and_p2_is_p1s_rival()
+        action = predict_pilot_move(state, "p1", "small")
+        after = GameState.from_dict(state.to_dict())
+        action(after)
+        self.assertLess(after.punts[0].position, state.punts[0].position)
+
+    def test_forwards_signals_to_the_pilots_beliefs(self):
+        state = self._state_where_p1_pilots_and_p2_is_p1s_rival()
+        state.players[2].shares = [Share(ware=Ware.JADE), Share(ware=Ware.JADE)]
+        signals = [ShareSignal(player_id="p2", ware=Ware.JADE, source="purchase")]
+
+        with_signal = predict_pilot_move(state, "p1", "small", signals=signals)
+        pilot_beliefs = infer_beliefs(state, "p1", signals)
+        expected_action, _ = best_pilot_move(state, pilot_beliefs, "p1", "small")
+
+        after_with = GameState.from_dict(state.to_dict())
+        with_signal(after_with)
+        after_expected = GameState.from_dict(state.to_dict())
+        expected_action(after_expected)
+        self.assertEqual(after_with.punts[0].position, after_expected.punts[0].position)
+
+
+class TestWithPredictedPilotMoves(unittest.TestCase):
+    def test_no_pilots_occupied_leaves_the_board_unchanged(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 8
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        predicted = with_predicted_pilot_moves(state)
+        self.assertEqual(predicted.punts[0].position, 8)
+
+    def test_does_not_mutate_the_original_state(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 11
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [AccompliceSlot(price=1, occupant="p2")]
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        state.movement_round_index = 2
+        state.pilot_island.small.occupant = "p1"
+        state.players[2].cash = 500
+
+        with_predicted_pilot_moves(state)
+        self.assertEqual(state.punts[0].position, 11)
+
+    def test_folds_in_a_single_occupied_pilots_prediction(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 11
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [AccompliceSlot(price=1, occupant="p2")]
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        state.movement_round_index = 2
+        state.pilot_island.small.occupant = "p1"
+        state.players[2].cash = 500
+
+        predicted = with_predicted_pilot_moves(state)
+        action = predict_pilot_move(state, "p1", "small")
+        expected = GameState.from_dict(state.to_dict())
+        action(expected)
+        self.assertEqual(predicted.punts[0].position, expected.punts[0].position)
+
+    def test_large_pilots_prediction_sees_the_small_pilots_result(self):
+        # Both pilots occupied by different players. If small moves punt 0
+        # first, large's own prediction (also evaluated against punt 0)
+        # should be computed from that already-shifted position, not the
+        # original -- confirmed by comparing against manually chaining the
+        # two predictions in the same order.
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 11
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [AccompliceSlot(price=1, occupant="p2")]
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        state.movement_round_index = 2
+        state.pilot_island.small.occupant = "p1"
+        state.pilot_island.large.occupant = "p2"
+        state.players[1].cash = 500  # p1 is a rival too, so p2's large pilot has a reason to act
+
+        predicted = with_predicted_pilot_moves(state)
+
+        chained = GameState.from_dict(state.to_dict())
+        small_action = predict_pilot_move(chained, "p1", "small")
+        small_action(chained)
+        large_action = predict_pilot_move(chained, "p2", "large")
+        large_action(chained)
+
+        self.assertEqual(predicted.punts[0].position, chained.punts[0].position)
 
 
 if __name__ == "__main__":

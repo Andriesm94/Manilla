@@ -78,6 +78,20 @@ meant to be called again, fresh, once the pilot phase actually arrives
 round) -- punt positions will very likely have shifted since the
 accomplice was placed, so whatever looked best back then is a starting
 estimate, not a plan to execute unquestioned.
+
+An occupied pilot slot isn't just a threat to price into your own EV -- it
+represents a move that hasn't happened yet but will, and every other
+player's own decisions should account for it. `with_predicted_pilot_moves`
+predicts what each currently-seated pilot will do by running the exact same
+`best_pilot_move` logic *as if the predictor were that player*: their own
+beliefs (`infer_beliefs` anchored to them, not you -- their own shares
+exactly known, everyone else's, including yours, averaged from the secret
+pool the same way any belief is inferred), their own rivals, their own
+best move. This is one prediction layer deep, not a hall of mirrors: the
+predicted pilot doesn't itself further account for anyone predicting them.
+Whoever is about to place an accomplice of their own should run this first
+and reason against the *predicted* board, not the literal current one --
+the pilot isn't going to wait for anyone else to notice it.
 """
 
 from __future__ import annotations
@@ -85,9 +99,9 @@ from __future__ import annotations
 import itertools
 from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-from manilla.engine.beliefs import ShareBeliefs, share_value_estimate
+from manilla.engine.beliefs import ShareBeliefs, ShareSignal, infer_beliefs, share_value_estimate
 from manilla.engine.expected_value import (
     Numeric,
     dock_slot_expected_payout,
@@ -526,3 +540,66 @@ def pilot_slot_value(
     """
     _, impact = best_pilot_move(state, beliefs, my_id, pilot_size, p_safe_if_caught)
     return impact.total_rev_after
+
+
+def occupied_pilot_slots(state: GameState) -> List[Tuple[str, str]]:
+    """`[(pilot_size, player_id), ...]` for every currently occupied pilot
+    slot, small before large (the order `BoardSetupApp._show_pilot_dialogs`
+    resolves them in)."""
+    slots = []
+    if state.pilot_island.small.occupant:
+        slots.append(("small", state.pilot_island.small.occupant))
+    if state.pilot_island.large.occupant:
+        slots.append(("large", state.pilot_island.large.occupant))
+    return slots
+
+
+def predict_pilot_move(
+    state: GameState,
+    pilot_player_id: str,
+    pilot_size: str,
+    signals: Iterable[ShareSignal] = (),
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> Callable[[GameState], None]:
+    """Predict what `pilot_player_id` will do with the `pilot_size` pilot
+    they occupy, by running `best_pilot_move` exactly as they would run it
+    themselves: their own beliefs (`infer_beliefs(state, pilot_player_id,
+    signals)` -- their own shares exactly known, everyone else's averaged
+    from the secret pool, the same inference any viewer gets), their own
+    rivals, their own best move. `signals` should be whatever public
+    share-reveal events (harbor-master purchases, forward punt starts) are
+    already known -- see `beliefs.infer_beliefs` -- since those are common
+    knowledge, not something specific to the predictor.
+
+    Returns the predicted mutator, ready to feed into `action_impact` or
+    apply directly to a state clone -- see `with_predicted_pilot_moves` for
+    folding every currently-seated pilot's prediction in at once.
+    """
+    pilot_beliefs = infer_beliefs(state, pilot_player_id, signals)
+    action, _ = best_pilot_move(state, pilot_beliefs, pilot_player_id, pilot_size, p_safe_if_caught)
+    return action
+
+
+def with_predicted_pilot_moves(
+    state: GameState,
+    signals: Iterable[ShareSignal] = (),
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> GameState:
+    """A clone of `state` with every currently-occupied pilot slot's
+    predicted move already applied (see `predict_pilot_move`). Use this as
+    the starting board for your own wealth/REV calculations whenever
+    anyone -- including yourself -- already holds a pilot accomplice: their
+    move isn't waiting on you noticing it, so reasoning against the literal
+    current board would be reasoning against a state that's about to
+    change out from under you.
+
+    If both pilot slots are occupied, small is predicted and applied
+    before large is even evaluated, matching the order they actually
+    resolve in and letting the large pilot's prediction see the small
+    pilot's (predicted) result, not the untouched board.
+    """
+    predicted = GameState.from_dict(state.to_dict())
+    for pilot_size, player_id in occupied_pilot_slots(predicted):
+        action = predict_pilot_move(predicted, player_id, pilot_size, signals, p_safe_if_caught)
+        action(predicted)
+    return predicted
