@@ -43,10 +43,22 @@ class TestPuntProbabilities(unittest.TestCase):
 
 class TestWareSlotEV(unittest.TestCase):
     def test_matches_hand_computation_for_a_simple_case(self):
-        # start=8, 1 round left, ginseng slot 0 (price 3, payout 18):
+        # start=8, 1 round left, ginseng slot 0 -- the cheapest vacant slot,
+        # price 1 (DEFAULT_WARE_SLOT_PRICES lists ginseng as [3, 2, 1], but
+        # placement always takes the cheapest available regardless of its
+        # position in that list). Payout 18.
         # p_safe = P(arrived) + P(caught_on_13) = 1/6 + 1/6 = 1/3.
         ev = ware_slot_ev(Ware.GINSENG, 0, start=8, rounds_remaining=1, accomplices_on_punt=1)
-        self.assertEqual(ev, Fraction(1, 3) * 18 - 3)
+        self.assertEqual(ev, Fraction(1, 3) * 18 - 1)
+
+    def test_slot_index_follows_fill_order_not_raw_array_order(self):
+        # Ginseng's raw price list is [3, 2, 1] (descending); slot_index
+        # should walk it cheapest-first (1, 2, 3) to match real placement.
+        cheapest = ware_slot_ev(Ware.GINSENG, 0, start=8, rounds_remaining=1, accomplices_on_punt=1)
+        middle = ware_slot_ev(Ware.GINSENG, 1, start=8, rounds_remaining=1, accomplices_on_punt=1)
+        priciest = ware_slot_ev(Ware.GINSENG, 2, start=8, rounds_remaining=1, accomplices_on_punt=1)
+        self.assertEqual(cheapest - middle, 1)  # price 1 vs price 2
+        self.assertEqual(middle - priciest, 1)  # price 2 vs price 3
 
     def test_more_accomplices_split_the_payout_further(self):
         solo = ware_slot_ev(Ware.GINSENG, 0, start=8, rounds_remaining=1, accomplices_on_punt=1)

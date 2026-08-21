@@ -101,12 +101,16 @@ def ware_slot_ev(
     p_safe_if_caught: Numeric = 1,
 ) -> Fraction:
     """Expected net coin return of paying to place an accomplice on a ware
-    punt's `slot_index`'th slot (0 = cheapest/first-filled), for that punt's
-    ware currently sitting at `start` with `rounds_remaining` movement
-    rounds left. See `ware_slot_expected_payout` for the gross payout this
-    nets against the slot's price.
+    punt's `slot_index`'th slot (0 = cheapest/first-filled -- placement
+    always takes the cheapest vacant slot regardless of its position in
+    DEFAULT_WARE_SLOT_PRICES, see
+    `BoardSetupApp._place_or_remove_punt_accomplice`; the prices are sorted
+    ascending here so `slot_index` means fill order, not raw array index),
+    for that punt's ware currently sitting at `start` with `rounds_remaining`
+    movement rounds left. See `ware_slot_expected_payout` for the gross
+    payout this nets against the slot's price.
     """
-    prices = DEFAULT_WARE_SLOT_PRICES[ware]
+    prices = sorted(DEFAULT_WARE_SLOT_PRICES[ware])
     if not 0 <= slot_index < len(prices):
         raise ValueError(f"{ware.value} has slots 0..{len(prices) - 1}, got {slot_index}")
 

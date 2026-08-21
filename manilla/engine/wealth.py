@@ -26,6 +26,19 @@ full capacity by default and only falls back to the current count in the
 last two turns before the third (final) dice throw, when there's no
 realistic time left for another accomplice to join.
 
+This projection isn't specific to valuing *someone else's* slot -- the same
+logic applies when deciding whether to take a vacant slot yourself. A punt
+that looks great right now (a big-payout ware, decent odds) looks great to
+every other EV-seeking bot too, so a slot worth taking alone is usually a
+slot several accomplices end up splitting; using "just me" instead of the
+projection would systematically overvalue exactly the placements everyone
+else also wants. This does mean a not-yet-occupied slot and its
+already-occupied neighbor can price out to a similar expected return under
+the same projection -- that's not a bug, it reflects that turn order and
+slot scarcity, not the EV formula, are what decide who actually claims
+which slot once a punt is genuinely worth joining at any point in its fill
+sequence.
+
 A **rival** is any opponent whose estimated wealth exceeds the viewer's own;
 REV is the coin gap to a specific rival (`rival_wealth_est - my_wealth_est`,
 positive when they're ahead). Turning this into "pick the action that best
