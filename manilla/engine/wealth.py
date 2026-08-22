@@ -92,6 +92,17 @@ predicted pilot doesn't itself further account for anyone predicting them.
 Whoever is about to place an accomplice of their own should run this first
 and reason against the *predicted* board, not the literal current one --
 the pilot isn't going to wait for anyone else to notice it.
+
+The pirate captain has a second source of value beyond the mandatory
+end-of-voyage plunder `pirate_expected_payout` already covers: a punt that
+lands exactly on space SEA_ROUTE_LENGTH right after the *second* dice
+throw is guaranteed to overshoot on the third and complete its voyage
+safely, so the captain may seize one of its still-vacant ware slots for
+free right then (`BoardSetupApp._handle_pirate_boarding`) -- a free ware
+accomplice, not a price to weigh. `pirate_captain_boarding_bonus` only
+matters while placing during the first or second accomplice round, before
+that roll has happened, and only for the captain -- per the user, the
+second pirate's own equivalent opportunity is deliberately left unmodeled.
 """
 
 from __future__ import annotations
@@ -110,6 +121,7 @@ from manilla.engine.expected_value import (
     punt_shipyard_probability,
     ware_slot_expected_payout,
 )
+from manilla.engine.probability import position_outcomes
 from manilla.engine.models import (
     GameState,
     Phase,
@@ -231,6 +243,47 @@ def _dock_arrival_probs(state: GameState, destination: str) -> List[Numeric]:
     return probs
 
 
+def pirate_captain_boarding_bonus(state: GameState) -> Fraction:
+    """The pirate captain's extra placement-time value from the free
+    mid-voyage boarding opportunity right after the second dice throw
+    (`BoardSetupApp._handle_pirate_boarding`): a punt landing exactly on
+    space SEA_ROUTE_LENGTH at that moment is guaranteed to complete its
+    voyage on the third roll (the minimum possible roll already clears
+    it), so the captain may seize one of its still-vacant ware slots for
+    free right then, splitting the cargo profit with whoever's already
+    there. Only meaningful while placing during the first or second
+    accomplice round -- 0 once that roll has already happened
+    (`state.movement_round_index >= 2`).
+
+    Heuristic, per the user: every punt with a vacant ware slot right now
+    is assumed to still have one at the boarding moment -- no further
+    regular ware-accomplice placements are assumed to land there in the
+    meantime, unlike `project_final_occupancy`'s "assume full" default for
+    valuing those regular placements over the whole rest of the voyage.
+    The captain can only physically board one punt even if several turn
+    out to qualify simultaneously; this sums each punt's contribution
+    independently rather than modeling which single one would actually be
+    chosen, slightly overstating the rare case where more than one is
+    boardable at once.
+    """
+    rounds_until_boarding = 2 - state.movement_round_index
+    if rounds_until_boarding <= 0:
+        return Fraction(0)
+
+    bonus = Fraction(0)
+    for punt in state.punts:
+        if punt.ware is None or punt.status != PuntStatus.ON_ROUTE:
+            continue
+        occupied = sum(1 for s in punt.ware_slots if s.occupant is not None)
+        if occupied >= len(punt.ware_slots):
+            continue  # no vacant slot for the captain to seize
+        p_boardable = position_outcomes(punt.position, rounds_until_boarding)["caught_on_13"]
+        share = PLUNDER_PAYOUTS[punt.ware] // (occupied + 1)
+        bonus += p_boardable * share
+
+    return bonus
+
+
 def expected_accomplice_return(
     state: GameState, player_id: str, p_safe_if_caught: Optional[Numeric] = None
 ) -> Fraction:
@@ -279,6 +332,8 @@ def expected_accomplice_return(
             if p.ware is not None and p.status == PuntStatus.ON_ROUTE
         ]
         total += pirate_expected_payout(punts, current_pirate_count)
+        if player_id == pirate_ids["captain"]:
+            total += pirate_captain_boarding_bonus(state)
 
     return total
 

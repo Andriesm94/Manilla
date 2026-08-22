@@ -9,6 +9,7 @@ from manilla.engine.models import (
     AccompliceSlot,
     GameState,
     Phase,
+    PLUNDER_PAYOUTS,
     PuntStatus,
     SHARE_REPAY_AMOUNT,
     Share,
@@ -21,6 +22,7 @@ from manilla.engine.expected_value import (
     punt_port_probability,
     ware_slot_expected_payout,
 )
+from manilla.engine.probability import position_outcomes
 from manilla.engine.wealth import (
     action_impact,
     apply_pilot_move,
@@ -33,6 +35,7 @@ from manilla.engine.wealth import (
     occupied_pilot_slots,
     pilot_move_candidates,
     pilot_slot_value,
+    pirate_captain_boarding_bonus,
     pirate_threat,
     predict_pilot_move,
     project_final_occupancy,
@@ -116,11 +119,14 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         # 30 (silk's plunder payout) split across its 1 occupied slot
         # (already resolved, not projected). p0's lone pirate captaincy is
         # valued using exactly the 1 pirate actually aboard -- no
-        # projection, see test_pirate_valuation_never_projects_occupancy.
+        # projection, see test_pirate_valuation_never_projects_occupancy --
+        # plus the round-1/2 free-boarding bonus (movement_round_index=0
+        # here), see TestPirateCaptainBoardingBonus.
         pirate_part = pirate_expected_payout(
             [(Ware.GINSENG, 8, 3), (Ware.NUTMEG, 5, 3)], pirate_count=1
         )
-        self.assertEqual(expected_accomplice_return(state, "p0"), Fraction(30) + pirate_part)
+        boarding_bonus = pirate_captain_boarding_bonus(state)
+        self.assertEqual(expected_accomplice_return(state, "p0"), Fraction(30) + pirate_part + boarding_bonus)
 
     def test_pirate_valuation_never_projects_occupancy(self):
         # Unlike ware punts, the pirate boat gets no occupancy projection at
@@ -323,6 +329,96 @@ class TestPirateThreat(unittest.TestCase):
         state = _make_state()
         state.pirate_boat.second.occupant = "p1"
         self.assertEqual(pirate_threat(state), 0)
+
+
+class TestPirateCaptainBoardingBonus(unittest.TestCase):
+    def _punt_with_vacancy(self, state, index, ware, position, occupied_slots, total_slots):
+        punt = state.punts[index]
+        punt.ware = ware
+        punt.position = position
+        punt.status = PuntStatus.ON_ROUTE
+        punt.ware_slots = [AccompliceSlot(price=1, occupant="pX") for _ in range(occupied_slots)] + [
+            AccompliceSlot(price=1, occupant=None) for _ in range(total_slots - occupied_slots)
+        ]
+        return punt
+
+    def test_zero_after_the_second_dice_throw_has_happened(self):
+        state = _make_state()
+        self._punt_with_vacancy(state, 0, Ware.GINSENG, 8, occupied_slots=1, total_slots=3)
+        state.movement_round_index = 2
+        self.assertEqual(pirate_captain_boarding_bonus(state), 0)
+
+    def test_nonzero_in_the_first_accomplice_round(self):
+        state = _make_state()
+        self._punt_with_vacancy(state, 0, Ware.GINSENG, 8, occupied_slots=1, total_slots=3)
+        state.movement_round_index = 0
+        self.assertGreater(pirate_captain_boarding_bonus(state), 0)
+
+    def test_matches_a_hand_assembled_single_punt_computation(self):
+        state = _make_state()
+        self._punt_with_vacancy(state, 0, Ware.GINSENG, 8, occupied_slots=1, total_slots=3)
+        state.movement_round_index = 1  # 1 round until the boarding roll
+        p_boardable = position_outcomes(8, 1)["caught_on_13"]
+        expected = p_boardable * (PLUNDER_PAYOUTS[Ware.GINSENG] // 2)  # occupied(1) + captain
+        self.assertEqual(pirate_captain_boarding_bonus(state), expected)
+
+    def test_sums_across_multiple_boardable_punts(self):
+        state = _make_state()
+        self._punt_with_vacancy(state, 0, Ware.GINSENG, 8, occupied_slots=1, total_slots=3)
+        self._punt_with_vacancy(state, 1, Ware.NUTMEG, 5, occupied_slots=0, total_slots=3)
+        state.movement_round_index = 0
+        one = pirate_captain_boarding_bonus(state)
+
+        solo_state = _make_state()
+        self._punt_with_vacancy(solo_state, 0, Ware.GINSENG, 8, occupied_slots=1, total_slots=3)
+        solo_state.movement_round_index = 0
+        solo = pirate_captain_boarding_bonus(solo_state)
+
+        other_state = _make_state()
+        self._punt_with_vacancy(other_state, 1, Ware.NUTMEG, 5, occupied_slots=0, total_slots=3)
+        other_state.movement_round_index = 0
+        other = pirate_captain_boarding_bonus(other_state)
+
+        self.assertEqual(one, solo + other)
+
+    def test_skips_a_fully_occupied_punt(self):
+        state = _make_state()
+        self._punt_with_vacancy(state, 0, Ware.GINSENG, 8, occupied_slots=3, total_slots=3)
+        state.movement_round_index = 0
+        self.assertEqual(pirate_captain_boarding_bonus(state), 0)
+
+    def test_assumes_occupied_plus_one_not_full_capacity(self):
+        # A ginseng punt with 1 of 3 slots taken: the bonus should value
+        # the captain's free seat as splitting 2 ways (occupied + captain),
+        # not 3 ways as project_final_occupancy's "assume full" would.
+        state = _make_state()
+        self._punt_with_vacancy(state, 0, Ware.GINSENG, 8, occupied_slots=1, total_slots=3)
+        state.movement_round_index = 1
+        p_boardable = position_outcomes(8, 1)["caught_on_13"]
+        two_way_share = p_boardable * (PLUNDER_PAYOUTS[Ware.GINSENG] // 2)
+        three_way_share = p_boardable * (PLUNDER_PAYOUTS[Ware.GINSENG] // 3)
+        self.assertEqual(pirate_captain_boarding_bonus(state), two_way_share)
+        self.assertNotEqual(pirate_captain_boarding_bonus(state), three_way_share)
+
+
+class TestBoardingBonusOnlyAppliesToTheCaptain(unittest.TestCase):
+    def test_captain_gets_the_bonus_second_does_not(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 8
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [AccompliceSlot(price=1, occupant=None)] * 3
+        state.movement_round_index = 0
+        state.pirate_boat.captain.occupant = "p0"
+        state.pirate_boat.second.occupant = "p1"
+
+        bonus = pirate_captain_boarding_bonus(state)
+        self.assertGreater(bonus, 0)
+
+        punts = [(Ware.GINSENG, 8, 3)]
+        plain_pirate_part = pirate_expected_payout(punts, pirate_count=2)
+        self.assertEqual(expected_accomplice_return(state, "p0"), plain_pirate_part + bonus)
+        self.assertEqual(expected_accomplice_return(state, "p1"), plain_pirate_part)
 
 
 class TestExpectedAccompliceReturnAutoDerivesPirateThreat(unittest.TestCase):
