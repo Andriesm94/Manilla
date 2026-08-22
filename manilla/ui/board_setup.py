@@ -886,7 +886,11 @@ class BoardSetupApp(tk.Frame):
     def _handle_pirate_boarding(self, then: Optional[Callable[[], None]] = None) -> None:
         """Punts caught on space 13 after round 2 (still ON_ROUTE) may be
         boarded for free by the pirates -- captain first, then the second
-        pirate -- if a vacant ware-accomplice space is available on them."""
+        pirate -- if a vacant ware-accomplice space is available on them.
+        Boarding is the pirate's piece physically leaving the boat, so it
+        vacates their pirate-boat slot; if the captain boards and the
+        second pirate stays behind, the second immediately moves up to the
+        now-vacant captain spot."""
         finish = then or (lambda: None)
         candidates = [
             p
@@ -898,21 +902,27 @@ class BoardSetupApp(tk.Frame):
             return
         pb = self.state_obj.pirate_boat
 
+        def maybe_promote_second() -> None:
+            if pb.captain.occupant is None and pb.second.occupant is not None:
+                pb.captain.occupant = pb.second.occupant
+                pb.second.occupant = None
+            finish()
+
         def after_captain() -> None:
             if pb.second.occupant:
-                self._show_boarding_dialog(pb.second.occupant, "Second pirate", candidates, finish)
+                self._show_boarding_dialog(pb.second, "Second pirate", candidates, maybe_promote_second)
             else:
-                finish()
+                maybe_promote_second()
 
         if pb.captain.occupant:
-            self._show_boarding_dialog(pb.captain.occupant, "Pirate captain", candidates, after_captain)
+            self._show_boarding_dialog(pb.captain, "Pirate captain", candidates, after_captain)
         else:
             after_captain()
 
     def _show_boarding_dialog(
-        self, pirate_player_id: str, role_label: str, candidates: List[Punt], then: Callable[[], None]
+        self, boat_slot: AccompliceSlot, role_label: str, candidates: List[Punt], then: Callable[[], None]
     ) -> None:
-        player = self.state_obj.player_by_id(pirate_player_id)
+        player = self.state_obj.player_by_id(boat_slot.occupant)
         boardable = [p for p in candidates if any(s.occupant is None for s in p.ware_slots)]
         if player is None or not boardable:
             then()
@@ -921,7 +931,7 @@ class BoardSetupApp(tk.Frame):
         if player.is_bot:
             # Random policy: board a random eligible punt about 60% of the
             # time, otherwise skip.
-            self.after(BOT_DELAY_MS, lambda: self._bot_board_or_skip(player, boardable, then))
+            self.after(BOT_DELAY_MS, lambda: self._bot_board_or_skip(player, boat_slot, boardable, then))
             return
 
         dialog = tk.Toplevel(self.winfo_toplevel())
@@ -944,8 +954,9 @@ class BoardSetupApp(tk.Frame):
             then()
 
         def board(punt: Punt) -> None:
-            slot = next(s for s in punt.ware_slots if s.occupant is None)
-            slot.occupant = player.id
+            ware_slot = next(s for s in punt.ware_slots if s.occupant is None)
+            ware_slot.occupant = player.id
+            boat_slot.occupant = None  # the pirate's piece physically left the boat
             resolve()
 
         for punt in boardable:
@@ -956,11 +967,14 @@ class BoardSetupApp(tk.Frame):
             ).pack(padx=12, pady=2, fill=tk.X)
         ttk.Button(dialog, text="Skip", command=resolve).pack(pady=(8, 10))
 
-    def _bot_board_or_skip(self, player: Player, boardable: List[Punt], then: Callable[[], None]) -> None:
+    def _bot_board_or_skip(
+        self, player: Player, boat_slot: AccompliceSlot, boardable: List[Punt], then: Callable[[], None]
+    ) -> None:
         if random.random() < 0.6:
             punt = random.choice(boardable)
-            slot = next(s for s in punt.ware_slots if s.occupant is None)
-            slot.occupant = player.id
+            ware_slot = next(s for s in punt.ware_slots if s.occupant is None)
+            ware_slot.occupant = player.id
+            boat_slot.occupant = None  # the pirate's piece physically left the boat
             self.refresh()
         then()
 
