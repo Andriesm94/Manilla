@@ -147,6 +147,27 @@ def average_secret_share_value(state: GameState, beliefs: ShareBeliefs) -> Fract
     return Fraction(total_value, slots)
 
 
+def assumed_share_count(state: GameState, beliefs: ShareBeliefs, player_id: str, ware: Ware) -> Fraction:
+    """`player_id`'s expected holdings of `ware` specifically: their
+    confirmed count of it, plus their unconfirmed shares' proportional
+    slice of the secret pool's `ware` composition (e.g. if the pool is 4/6
+    nutmeg, each of a player's unconfirmed shares counts as 4/6 of a
+    nutmeg share). Exact (an integer-valued `Fraction`) for the viewer's
+    own holdings, since none of their shares are unconfirmed. Summing this
+    over every ware for a player reproduces `share_value_estimate`'s
+    total, weighted by price instead of counted directly -- this is the
+    per-ware breakdown that total doesn't expose on its own."""
+    confirmed = beliefs.confirmed_count(player_id, ware)
+    unknown = unknown_count(state, beliefs, player_id)
+    if unknown == 0:
+        return Fraction(confirmed)
+    slots = total_secret_slots(state, beliefs)
+    if slots == 0:
+        return Fraction(confirmed)
+    pool = secret_pool(state, beliefs)
+    return Fraction(confirmed) + unknown * Fraction(pool[ware], slots)
+
+
 def share_value_estimate(state: GameState, beliefs: ShareBeliefs, player_id: str) -> Fraction:
     """`player_id`'s total share value as `viewer_id` would estimate it:
     confirmed shares at their exact black-market price, plus unconfirmed

@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manilla.engine.models import GameState, Share, Ware
 from manilla.engine.beliefs import (
     ShareSignal,
+    assumed_share_count,
     average_secret_share_value,
     infer_beliefs,
     punt_start_signals,
@@ -135,6 +136,43 @@ class TestPuntStartSignals(unittest.TestCase):
         beliefs = infer_beliefs(state, "p0", signals)
         self.assertEqual(beliefs.confirmed_count("p1", Ware.JADE), 1)
         self.assertEqual(unknown_count(state, beliefs, "p1"), 1)
+
+
+class TestAssumedShareCount(unittest.TestCase):
+    def test_matches_confirmed_count_when_fully_known(self):
+        state = _make_state()
+        state.players[0].shares = [Share(ware=Ware.SILK)]
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(assumed_share_count(state, beliefs, "p0", Ware.SILK), 1)
+        self.assertEqual(assumed_share_count(state, beliefs, "p0", Ware.JADE), 0)
+
+    def test_splits_unconfirmed_shares_by_pool_composition(self):
+        state = _make_state()
+        state.players[1].shares = [Share(ware=Ware.NUTMEG), Share(ware=Ware.NUTMEG)]
+        state.players[2].shares = [Share(ware=Ware.NUTMEG), Share(ware=Ware.NUTMEG)]
+        state.players[3].shares = [Share(ware=Ware.GINSENG), Share(ware=Ware.GINSENG)]
+        beliefs = infer_beliefs(state, "p0")
+
+        self.assertEqual(assumed_share_count(state, beliefs, "p1", Ware.NUTMEG), Fraction(4, 3))
+        self.assertEqual(assumed_share_count(state, beliefs, "p1", Ware.GINSENG), Fraction(2, 3))
+        self.assertEqual(assumed_share_count(state, beliefs, "p1", Ware.SILK), 0)
+
+    def test_sums_to_share_value_estimate_when_weighted_by_price(self):
+        state = _make_state()
+        state.players[1].shares = [Share(ware=Ware.NUTMEG), Share(ware=Ware.NUTMEG)]
+        state.players[2].shares = [Share(ware=Ware.NUTMEG), Share(ware=Ware.NUTMEG)]
+        state.players[3].shares = [Share(ware=Ware.GINSENG), Share(ware=Ware.GINSENG)]
+        beliefs = infer_beliefs(state, "p0")
+
+        via_breakdown = sum(
+            assumed_share_count(state, beliefs, "p1", w) * state.black_market.share_price(w) for w in Ware
+        )
+        self.assertEqual(via_breakdown, share_value_estimate(state, beliefs, "p1"))
+
+    def test_zero_confirmed_and_zero_secret_pool_gives_zero(self):
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(assumed_share_count(state, beliefs, "p1", Ware.SILK), 0)
 
 
 if __name__ == "__main__":
