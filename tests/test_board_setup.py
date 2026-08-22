@@ -200,6 +200,86 @@ class TestPlunderOnlyAfterRound3Roll(TkTestCase):
         self.assertEqual(punt.status, PuntStatus.IN_PORT)
 
 
+class TestPlunderDestinationDecision(TkTestCase):
+    """When a punt is plundered, the captain -- or the second pirate if
+    they're aboard alone -- chooses port vs. shipyard for that punt,
+    independently for each plundered punt."""
+
+    def test_human_captain_sends_punt_to_port(self):
+        punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
+        self.set_pirates(captain=True, second=False)
+
+        with mock.patch("manilla.ui.board_setup.messagebox.askyesno", return_value=True) as askyesno:
+            self.app._resolve_plunder(punt)
+
+        askyesno.assert_called_once()
+        self.assertIn(self.state.players[0].name, askyesno.call_args[0][1], "dialog names the captain")
+        self.assertEqual(punt.status, PuntStatus.IN_PORT)
+
+    def test_human_captain_sends_punt_to_shipyard(self):
+        punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
+        self.set_pirates(captain=True, second=False)
+
+        with mock.patch("manilla.ui.board_setup.messagebox.askyesno", return_value=False):
+            self.app._resolve_plunder(punt)
+
+        self.assertEqual(punt.status, PuntStatus.IN_SHIPYARD)
+
+    def test_bot_captain_decides_without_a_dialog(self):
+        punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
+        self.set_pirates(captain=True, second=False)
+        self.state.players[0].is_bot = True
+
+        with mock.patch("manilla.ui.board_setup.messagebox.askyesno") as askyesno, mock.patch(
+            "manilla.ui.board_setup.random.random", return_value=0.0
+        ):
+            self.app._resolve_plunder(punt)
+
+        askyesno.assert_not_called()
+        self.assertEqual(punt.status, PuntStatus.IN_PORT)
+
+    def test_lone_second_pirate_decides_when_captain_absent(self):
+        """No captain aboard -- the decision falls to the second pirate,
+        by name, not a generic 'The pirates' placeholder."""
+        punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
+        self.set_pirates(captain=False, second=True)
+
+        with mock.patch("manilla.ui.board_setup.messagebox.askyesno", return_value=True) as askyesno:
+            self.app._resolve_plunder(punt)
+
+        askyesno.assert_called_once()
+        self.assertIn(self.state.players[1].name, askyesno.call_args[0][1], "dialog names the second pirate")
+        self.assertEqual(punt.status, PuntStatus.IN_PORT)
+
+    def test_lone_second_pirate_bot_decides_without_blocking_a_dialog(self):
+        """The bug this guards against: with no captain aboard, a bot
+        second pirate must not fall through to a blocking human dialog --
+        that would hang an all-bot simulation."""
+        punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
+        self.set_pirates(captain=False, second=True)
+        self.state.players[1].is_bot = True
+
+        with mock.patch("manilla.ui.board_setup.messagebox.askyesno") as askyesno, mock.patch(
+            "manilla.ui.board_setup.random.random", return_value=0.99
+        ):
+            self.app._resolve_plunder(punt)
+
+        askyesno.assert_not_called()
+        self.assertEqual(punt.status, PuntStatus.IN_SHIPYARD)
+
+    def test_each_plundered_punt_decided_independently(self):
+        a = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
+        b = self.make_punt(1, Ware.SILK, SEA_ROUTE_LENGTH)
+        self.set_pirates(captain=True, second=False)
+
+        with mock.patch("manilla.ui.board_setup.messagebox.askyesno", side_effect=[True, False]):
+            self.app._resolve_plunder(a)
+            self.app._resolve_plunder(b)
+
+        self.assertEqual(a.status, PuntStatus.IN_PORT)
+        self.assertEqual(b.status, PuntStatus.IN_SHIPYARD)
+
+
 class TestPilotPhaseIntegration(TkTestCase):
     """Drives the real turn -> pilot dialog -> round-3 roll chain (not just
     the individual helpers) to confirm nothing pirate-related fires while
@@ -356,6 +436,64 @@ class TestSecondPirateBecomesCaptain(TkTestCase):
         pb = self.state.pirate_boat
         self.assertEqual(pb.captain.occupant, second_id, "bot second promoted after the bot captain boarded")
         self.assertIsNone(pb.second.occupant)
+
+
+class TestPirateSlotPlacementInvariant(TkTestCase):
+    """It must never be possible for the pirate boat to hold only a second
+    pirate with no captain -- placement always fills the captain slot
+    first, and removing the captain promotes a present second pirate."""
+
+    def test_clicking_vacant_second_circle_places_as_captain(self):
+        pb = self.state.pirate_boat
+
+        self.app._place_or_remove_pirate_slot(pb.second, True)
+
+        self.assertIsNotNone(pb.captain.occupant, "placement redirected to the captain slot")
+        self.assertIsNone(pb.second.occupant, "second stays vacant until a captain is aboard")
+
+    def test_clicking_vacant_captain_circle_places_as_captain(self):
+        pb = self.state.pirate_boat
+
+        self.app._place_or_remove_pirate_slot(pb.captain, False)
+
+        self.assertIsNotNone(pb.captain.occupant)
+        self.assertIsNone(pb.second.occupant)
+
+    def test_second_only_fills_once_captain_is_present(self):
+        self.set_pirates(captain=True, second=False)
+        pb = self.state.pirate_boat
+        self.state.current_turn_player_id = self.state.players[1].id
+
+        self.app._place_or_remove_pirate_slot(pb.second, True)
+
+        self.assertEqual(pb.second.occupant, self.state.players[1].id)
+        self.assertEqual(pb.captain.occupant, self.state.players[0].id, "captain untouched")
+
+    def test_removing_captain_while_second_present_promotes_second_and_refunds_captain(self):
+        self.set_pirates(captain=True, second=True)
+        pb = self.state.pirate_boat
+        captain_id, second_id = pb.captain.occupant, pb.second.occupant
+        captain_player = self.state.player_by_id(captain_id)
+        cash_before = captain_player.cash
+
+        self.app._place_or_remove_pirate_slot(pb.captain, False)
+
+        self.assertEqual(pb.captain.occupant, second_id, "second promoted into the vacated captain slot")
+        self.assertIsNone(pb.second.occupant)
+        self.assertEqual(captain_player.cash, cash_before + pb.captain.price, "old captain refunded on removal")
+
+    def test_removing_second_alone_leaves_captain_untouched(self):
+        self.set_pirates(captain=True, second=True)
+        pb = self.state.pirate_boat
+        captain_id, second_id = pb.captain.occupant, pb.second.occupant
+        second_player = self.state.player_by_id(second_id)
+        cash_before = second_player.cash
+
+        self.app._place_or_remove_pirate_slot(pb.second, True)
+
+        self.assertEqual(pb.captain.occupant, captain_id, "removing the second must not disturb the captain")
+        self.assertIsNone(pb.second.occupant)
+        self.assertEqual(second_player.cash, cash_before + pb.second.price)
 
 
 if __name__ == "__main__":

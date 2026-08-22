@@ -865,15 +865,19 @@ class BoardSetupApp(tk.Frame):
         for slot in punt.ware_slots:
             slot.occupant = None  # accomplices are returned, empty-handed
 
+        # The captain always makes the port-vs-shipyard call when aboard;
+        # if only the second pirate is present, the decision falls to them.
         captain_player = self.state_obj.player_by_id(pb.captain.occupant) if pb.captain.occupant else None
-        captain_name = captain_player.name if captain_player else "The pirates"
-        if captain_player is not None and captain_player.is_bot:
+        second_player = self.state_obj.player_by_id(pb.second.occupant) if pb.second.occupant else None
+        decider = captain_player or second_player
+        decider_name = decider.name if decider else "The pirates"
+        if decider is not None and decider.is_bot:
             send_to_port = random.random() < 0.5
         else:
             send_to_port = messagebox.askyesno(
                 "Pirates plunder!",
                 f"Punt {punt.id} ({punt.ware.value}) was caught on space 13!\n"
-                f"{captain_name} splits {payout} PESOS with the crew.\n\n"
+                f"{decider_name} splits {payout} PESOS with the crew.\n\n"
                 f"Send this punt to the PORT? (No sends it to the shipyard instead.)",
             )
         status = PuntStatus.IN_PORT if send_to_port else PuntStatus.IN_SHIPYARD
@@ -1444,10 +1448,22 @@ class BoardSetupApp(tk.Frame):
             self._draw_slot_price_if_vacant(cx, MISC_ROW_Y, slot)
 
     def _place_or_remove_pirate_slot(self, slot: AccompliceSlot, is_second: bool) -> None:
-        """The second pirate space can't be filled until the captain's is."""
-        if is_second and slot.occupant is None and self.state_obj.pirate_boat.captain.occupant is None:
+        """A new pirate accomplice always becomes the captain -- clicking
+        either vacant circle before anyone's aboard fills the captain
+        slot, never the second directly. Removing the captain while the
+        second pirate is still aboard promotes the second up to captain,
+        since it must never be possible for only the second pirate to be
+        present."""
+        pb = self.state_obj.pirate_boat
+        if slot.occupant is None:
+            target = pb.captain if pb.captain.occupant is None else slot
+            self._place_or_remove_accomplice(target)
             return
+        promote_second = not is_second and pb.second.occupant is not None
         self._place_or_remove_accomplice(slot)
+        if promote_second:
+            pb.captain.occupant = pb.second.occupant
+            pb.second.occupant = None
 
     def _draw_pilot_island(self) -> None:
         c = self.canvas
