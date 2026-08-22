@@ -24,6 +24,7 @@ from manilla.engine.expected_value import (
 )
 from manilla.engine.probability import position_outcomes
 from manilla.engine.wealth import (
+    DEFENSIVE_WEALTH_MARGIN,
     action_impact,
     apply_pilot_move,
     apply_pirate_placement,
@@ -263,6 +264,31 @@ class TestWealthEstimate(unittest.TestCase):
             wealth_estimate(state, beliefs, "nobody")
 
 
+class TestDefensiveWealthMargin(unittest.TestCase):
+    def test_the_viewers_own_estimate_is_never_padded(self):
+        state = _make_state()
+        state.players[0].cash = 50
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(wealth_estimate(state, beliefs, "p0"), 50)
+
+    def test_every_other_players_estimate_is_padded(self):
+        state = _make_state()
+        state.players[1].cash = 50
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(wealth_estimate(state, beliefs, "p1"), 50 + DEFENSIVE_WEALTH_MARGIN)
+
+    def test_padding_applies_from_any_viewers_perspective_not_just_p0(self):
+        # The margin isn't hardcoded to "p0 is me" -- it's about whoever
+        # these beliefs are anchored to (beliefs.viewer_id) versus anyone
+        # else, so it applies just as much when predicting another
+        # player's own reasoning about a third player.
+        state = _make_state()
+        state.players[2].cash = 50
+        beliefs_from_p1 = infer_beliefs(state, "p1")
+        self.assertEqual(wealth_estimate(state, beliefs_from_p1, "p2"), 50 + DEFENSIVE_WEALTH_MARGIN)
+        self.assertEqual(wealth_estimate(state, beliefs_from_p1, "p1"), state.players[1].cash)
+
+
 class TestRivalsAndREV(unittest.TestCase):
     def test_only_strictly_wealthier_opponents_are_rivals(self):
         state = _make_state()
@@ -290,18 +316,20 @@ class TestRivalsAndREV(unittest.TestCase):
         self.assertEqual(identify_rivals(state, beliefs, "p0"), ["p2", "p1"])
 
     def test_rev_matches_the_wealth_gap(self):
+        # p1's estimate is padded by DEFENSIVE_WEALTH_MARGIN (15) on top of
+        # their raw cash, since p0 is only ever exact about its own wealth.
         state = _make_state()
         state.players[0].cash = 50
         state.players[1].cash = 53
         beliefs = infer_beliefs(state, "p0")
-        self.assertEqual(rev(state, beliefs, "p0", "p1"), 3)
+        self.assertEqual(rev(state, beliefs, "p0", "p1"), 3 + DEFENSIVE_WEALTH_MARGIN)
 
     def test_rev_can_go_negative_for_a_former_rival(self):
         state = _make_state()
         state.players[0].cash = 100
         state.players[1].cash = 53
         beliefs = infer_beliefs(state, "p0")
-        self.assertEqual(rev(state, beliefs, "p0", "p1"), -47)
+        self.assertEqual(rev(state, beliefs, "p0", "p1"), -47 + DEFENSIVE_WEALTH_MARGIN)
 
 
 class TestRevAdjustedScore(unittest.TestCase):
@@ -474,12 +502,16 @@ class TestActionImpact(unittest.TestCase):
         self.assertEqual(state.players[0].cash, 30)
 
     def test_no_op_action_gives_zero_gains(self):
+        # p1 is a rival on cash alone (500); p2 also counts as a rival now
+        # that DEFENSIVE_WEALTH_MARGIN pads every opponent's estimate --
+        # p2's padded wealth (30 + 15) exceeds p0's own exact 30.
         state = self._state_with_rival()
         beliefs = infer_beliefs(state, "p0")
         impact = action_impact(state, beliefs, "p0", lambda s: None)
         self.assertEqual(impact.my_gain, 0)
-        self.assertEqual(impact.rival_gains, {"p1": Fraction(0)})
-        self.assertEqual(impact.total_rev_after, -rev(state, beliefs, "p0", "p1"))
+        self.assertEqual(impact.rival_gains, {"p1": Fraction(0), "p2": Fraction(0)})
+        expected_total = -sum(rev(state, beliefs, "p0", r) for r in ("p1", "p2"))
+        self.assertEqual(impact.total_rev_after, expected_total)
 
     def test_taking_a_pirate_slot_hurts_a_rivals_endangered_ware_accomplice(self):
         # p1's ginseng accomplice goes from "safe if caught" to "certain

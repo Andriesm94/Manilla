@@ -338,22 +338,36 @@ def expected_accomplice_return(
     return total
 
 
+#: Defensive margin added to every *opponent's* wealth_estimate (never the
+#: viewer's own): assume anyone else has this many more pesos than
+#: calculated, so a cautious PC doesn't underestimate a rival's real
+#: position and get blindsided. Never applied to the viewer's own wealth,
+#: which is exact and needs no cushion.
+DEFENSIVE_WEALTH_MARGIN = 15
+
+
 def wealth_estimate(
     state: GameState, beliefs: ShareBeliefs, player_id: str, p_safe_if_caught: Optional[Numeric] = None
 ) -> Fraction:
     """`beliefs.viewer_id`'s best estimate of `player_id`'s total wealth --
     exact when `player_id == beliefs.viewer_id`, since a player always knows
-    their own hand."""
+    their own hand. Every other player's estimate is padded by
+    `DEFENSIVE_WEALTH_MARGIN` on top of the calculated figure, so a PC stays
+    cautious about opponents rather than assuming the raw guess is the
+    ceiling."""
     player = state.player_by_id(player_id)
     if player is None:
         raise ValueError(f"no player with id {player_id!r}")
 
-    return (
+    estimate = (
         Fraction(player.cash)
         + share_value_estimate(state, beliefs, player_id)
         - encumbered_penalty(player)
         + expected_accomplice_return(state, player_id, p_safe_if_caught)
     )
+    if player_id != beliefs.viewer_id:
+        estimate += DEFENSIVE_WEALTH_MARGIN
+    return estimate
 
 
 def identify_rivals(
