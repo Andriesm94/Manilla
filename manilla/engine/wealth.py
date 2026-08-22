@@ -402,6 +402,40 @@ def action_impact(
     return ActionImpact(my_gain=my_after - my_before, rival_gains=rival_gains, total_rev_after=total_rev_after)
 
 
+def apply_ware_slot_placement(punt_id: int, player_id: str) -> Callable[[GameState], None]:
+    """Build an `action_impact` mutator for placing `player_id` on punt
+    `punt_id`'s cheapest vacant ware slot, paying that slot's price --
+    matching `BoardSetupApp._place_or_remove_punt_accomplice`'s mandatory
+    cheapest-first rule. No-ops if the punt doesn't exist or has no vacant
+    slot.
+
+    Joining a punt a rival already occupies does not, by itself, show up
+    as reducing their `rival_gains` in `action_impact` -- and that's
+    correct, not a gap: `project_final_occupancy` already valued their
+    slot assuming the punt fills up regardless (see the module docstring),
+    so taking another slot doesn't change what they were already assumed
+    to get. It only shows up as a real cost to them in the last two turns
+    before the third dice throw, where `project_final_occupancy` switches
+    to actual occupancy -- by then there's no more room for "it would have
+    filled anyway" to still be true, so an actual join is a real dilution.
+    """
+
+    def _apply(state: GameState) -> None:
+        punt = next((p for p in state.punts if p.id == punt_id), None)
+        if punt is None:
+            return
+        vacant = [s for s in punt.ware_slots if s.occupant is None]
+        if not vacant:
+            return
+        cheapest = min(vacant, key=lambda s: s.price)
+        cheapest.occupant = player_id
+        player = state.player_by_id(player_id)
+        if player is not None:
+            player.cash -= cheapest.price
+
+    return _apply
+
+
 def apply_pirate_placement(role: str, player_id: str) -> Callable[[GameState], None]:
     """Build an `action_impact` mutator for placing `player_id` on the
     pirate boat's `role` ('captain' or 'second') slot, paying PIRATE_PRICE.

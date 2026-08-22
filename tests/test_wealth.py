@@ -25,6 +25,7 @@ from manilla.engine.wealth import (
     action_impact,
     apply_pilot_move,
     apply_pirate_placement,
+    apply_ware_slot_placement,
     best_pilot_move,
     encumbered_penalty,
     expected_accomplice_return,
@@ -417,6 +418,72 @@ class TestActionImpact(unittest.TestCase):
 
         impact = action_impact(state, beliefs, "p0", apply_pirate_placement("captain", "p0"))
         self.assertIn("p1", impact.rival_gains)
+
+
+class TestApplyWareSlotPlacement(unittest.TestCase):
+    def test_occupies_the_cheapest_vacant_slot_and_deducts_its_price(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [
+            AccompliceSlot(price=3, occupant=None),
+            AccompliceSlot(price=1, occupant=None),
+            AccompliceSlot(price=2, occupant=None),
+        ]
+        apply_ware_slot_placement(0, "p0")(state)
+        self.assertEqual(state.punts[0].ware_slots[1].occupant, "p0")  # the price=1 slot
+        self.assertEqual(state.players[0].cash, 30 - 1)
+
+    def test_ignores_an_unknown_punt(self):
+        state = _make_state()
+        apply_ware_slot_placement(99, "p0")(state)  # should not raise
+
+    def test_ignores_a_fully_occupied_punt(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [AccompliceSlot(price=1, occupant="p1")]
+        apply_ware_slot_placement(0, "p0")(state)
+        self.assertEqual(state.players[0].cash, 30)  # nothing charged
+
+
+class TestJoiningARivalsPuntDoesNotAppearToDenyThemPesos(unittest.TestCase):
+    def _rival_on_punt_state(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 8
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [
+            AccompliceSlot(price=1, occupant="p1"),
+            AccompliceSlot(price=2, occupant=None),
+            AccompliceSlot(price=3, occupant=None),
+        ]
+        state.players[1].cash = 500  # p1 is a rival
+        return state
+
+    def test_early_in_the_voyage_joining_does_not_reduce_a_rivals_wealth(self):
+        # Plenty of placement turns remain, so the punt was already valued
+        # as if it fills up regardless (project_final_occupancy) -- taking
+        # the second slot doesn't change what p1 was already assumed to
+        # get, so it shouldn't look like "denying" them anything.
+        state = self._rival_on_punt_state()
+        state.movement_round_index = 0
+        beliefs = infer_beliefs(state, "p0")
+        impact = action_impact(state, beliefs, "p0", apply_ware_slot_placement(0, "p0"))
+        self.assertEqual(impact.rival_gains["p1"], 0)
+
+    def test_in_the_final_turns_joining_genuinely_dilutes_a_rival(self):
+        # No placement time remains for "it would have filled anyway" to
+        # still be a safe assumption -- an actual join here really is a
+        # real, correctly-modeled cost to p1.
+        state = self._rival_on_punt_state()
+        state.players[0].is_harbor_master = False
+        state.players[1].is_harbor_master = True  # p1 goes first this round
+        state.movement_round_index = 2
+        state.current_turn_player_id = "p0"  # p0 is the last to act this round
+        beliefs = infer_beliefs(state, "p0")
+        impact = action_impact(state, beliefs, "p0", apply_ware_slot_placement(0, "p0"))
+        self.assertLess(impact.rival_gains["p1"], 0)
 
 
 class TestApplyPiratePlacement(unittest.TestCase):
