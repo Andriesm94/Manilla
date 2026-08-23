@@ -20,6 +20,9 @@ from manilla.engine.models import (
 from manilla.engine.beliefs import infer_beliefs
 from manilla.engine.expected_value import punt_port_probability
 from manilla.engine.harbor_master import (
+    _next_black_market_level,
+    _share_buying_values,
+    _share_price_gain,
     apply_punt_setup,
     best_punt_setup,
     best_shares_to_buy,
@@ -49,71 +52,131 @@ def _sell_out(state: GameState, ware: Ware) -> None:
     state.players[0].shares.extend(Share(ware=ware) for _ in range(SHARES_PER_WARE))
 
 
-class TestShareBuyingValue(unittest.TestCase):
-    def test_zero_and_five_project_to_twenty(self):
-        for start in (0, 5):
-            with self.subTest(start=start):
-                state = _make_state()
-                for w in Ware:
-                    if w != Ware.GINSENG:
-                        _sell_out(state, w)
-                state.black_market.values[Ware.GINSENG] = start
-                self.assertEqual(share_buying_value(state), 20 - max(5, start))
+class TestNextBlackMarketLevel(unittest.TestCase):
+    def test_steps_up_the_ladder_and_caps_at_thirty(self):
+        self.assertEqual(_next_black_market_level(0), 5)
+        self.assertEqual(_next_black_market_level(5), 10)
+        self.assertEqual(_next_black_market_level(10), 20)
+        self.assertEqual(_next_black_market_level(20), 30)
+        self.assertEqual(_next_black_market_level(30), 30)
 
-    def test_twenty_projects_to_thirty(self):
-        state = _make_state()
-        for w in Ware:
-            if w != Ware.GINSENG:
-                _sell_out(state, w)
-        state.black_market.values[Ware.GINSENG] = 20
-        self.assertEqual(share_buying_value(state), 30 - 20)
 
-    def test_ten_projects_to_thirty_when_nothing_is_at_twenty(self):
-        state = _make_state()
-        for w in Ware:
-            if w != Ware.GINSENG:
-                _sell_out(state, w)
-        state.black_market.values[Ware.GINSENG] = 10
-        self.assertEqual(share_buying_value(state), 30 - 10)
+class TestSharePriceGain(unittest.TestCase):
+    def test_zero_between_the_floor_levels_five_or_ten_above_it(self):
+        self.assertEqual(_share_price_gain(0, 5), 0)  # both floored at 5
+        self.assertEqual(_share_price_gain(5, 10), 5)
+        self.assertEqual(_share_price_gain(10, 20), 10)
+        self.assertEqual(_share_price_gain(20, 30), 10)
 
-    def test_ten_projects_to_twenty_when_something_is_at_twenty(self):
-        state = _make_state()
-        for w in Ware:
-            if w != Ware.GINSENG:
-                _sell_out(state, w)
-        state.black_market.values[Ware.GINSENG] = 10
-        state.black_market.values[Ware.SILK] = 20  # SILK is sold out, but its level still counts
-        self.assertEqual(share_buying_value(state), 20 - 10)
 
-    def test_picks_the_best_among_several_available_wares(self):
+class TestShareBuyingValues(unittest.TestCase):
+    def test_beginning_of_game_assumes_every_available_ware_worth_twenty(self):
+        # Every ware still at 0 -- no signal yet to couple with punt
+        # positioning, so per the user this falls back to a flat "worth
+        # 20 eventually" assumption for whichever share gets bought.
         state = _make_state()
-        state.black_market.values[Ware.GINSENG] = 20  # gain 10
-        state.black_market.values[Ware.NUTMEG] = 0  # gain 15
-        state.black_market.values[Ware.SILK] = 0  # gain 15
+        beliefs = infer_beliefs(state, "p0")
         _sell_out(state, Ware.JADE)
-        self.assertEqual(share_buying_value(state), 15)
+        values = _share_buying_values(state, beliefs, "p0")
+        self.assertEqual(values, {w: Fraction(20 - 5) for w in Ware if w != Ware.JADE})
+
+    def test_matches_the_flat_additive_formula_using_the_chosen_punt_setup(self):
+        # Once the market has moved off its all-zero start, each ware's
+        # value should be (1 + p) times its one-step price gain: the
+        # probabilistic this-voyage term (using the real arrival
+        # probability of whatever position best_punt_setup assigns it)
+        # plus a flat, unconditional further-step term of the same size
+        # (per the user's "assume all shares will rise 1 step further
+        # later in the game") -- see _share_buying_values' docstring.
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 5
+        state.black_market.values[Ware.NUTMEG] = 10
+        state.black_market.values[Ware.SILK] = 0
+        state.black_market.values[Ware.JADE] = 0
+        beliefs = infer_beliefs(state, "p0")
+
+        (wares_loaded, positions), _ = best_punt_setup(state, beliefs, "p0")
+        rounds_remaining = state.movement_rounds_total - state.movement_round_index
+
+        expected = {}
+        for ware in Ware:
+            current = state.black_market.values[ware]
+            gain = _share_price_gain(current, _next_black_market_level(current))
+            p = punt_port_probability(positions[ware], rounds_remaining) if ware in wares_loaded else Fraction(0)
+            expected[ware] = (1 + p) * gain
+
+        self.assertEqual(_share_buying_values(state, beliefs, "p0"), expected)
+
+    def test_the_ware_left_ashore_has_no_this_voyage_probability(self):
+        # A ware not loaded onto any punt this voyage can't rise this
+        # voyage at all, so its value should be exactly the flat
+        # guaranteed-later-rise term with no probabilistic contribution.
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 5
+        beliefs = infer_beliefs(state, "p0")
+        (wares_loaded, positions), _ = best_punt_setup(state, beliefs, "p0")
+        left_out = next(w for w in Ware if w not in wares_loaded)
+
+        current = state.black_market.values[left_out]
+        expected = Fraction(_share_price_gain(current, _next_black_market_level(current)))
+
+        self.assertEqual(_share_buying_values(state, beliefs, "p0")[left_out], expected)
+
+    def test_excludes_sold_out_and_maxed_out_wares(self):
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 30
+        _sell_out(state, Ware.NUTMEG)
+        beliefs = infer_beliefs(state, "p0")
+        values = _share_buying_values(state, beliefs, "p0")
+        self.assertNotIn(Ware.GINSENG, values)
+        self.assertNotIn(Ware.NUTMEG, values)
+
+    def test_reuses_a_planned_punt_setup_instead_of_recomputing(self):
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 5
+        beliefs = infer_beliefs(state, "p0")
+        planned = best_punt_setup(state, beliefs, "p0")[0]
+        self.assertEqual(
+            _share_buying_values(state, beliefs, "p0"),
+            _share_buying_values(state, beliefs, "p0", planned_punt_setup=planned),
+        )
+
+
+class TestShareBuyingValue(unittest.TestCase):
+    def test_is_the_max_of_the_per_ware_values(self):
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 20
+        state.black_market.values[Ware.NUTMEG] = 0
+        state.black_market.values[Ware.SILK] = 0
+        _sell_out(state, Ware.JADE)
+        beliefs = infer_beliefs(state, "p0")
+        values = _share_buying_values(state, beliefs, "p0")
+        self.assertEqual(share_buying_value(state, beliefs, "p0"), max(values.values()))
 
     def test_zero_when_nothing_is_available_to_buy(self):
         state = _make_state()
         for w in Ware:
             _sell_out(state, w)
-        self.assertEqual(share_buying_value(state), 0)
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(share_buying_value(state, beliefs, "p0"), 0)
 
 
 class TestBestSharesToBuy(unittest.TestCase):
     def test_returns_every_tied_best_ware(self):
         state = _make_state()
-        state.black_market.values[Ware.NUTMEG] = 0
-        state.black_market.values[Ware.SILK] = 0
-        state.black_market.values[Ware.GINSENG] = 20  # worse gain (10 vs 15)
+        # All four still at 0 -- the beginning-of-game special case makes
+        # every remaining ware equally "worth 20", so all three available
+        # ones tie.
         _sell_out(state, Ware.JADE)
-        self.assertEqual(set(best_shares_to_buy(state)), {Ware.NUTMEG, Ware.SILK})
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(set(best_shares_to_buy(state, beliefs, "p0")), {Ware.GINSENG, Ware.NUTMEG, Ware.SILK})
 
     def test_empty_when_nothing_is_worth_buying(self):
         state = _make_state()
         for w in Ware:
             _sell_out(state, w)
-        self.assertEqual(best_shares_to_buy(state), [])
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(best_shares_to_buy(state, beliefs, "p0"), [])
 
 
 class TestApplyPuntSetup(unittest.TestCase):
@@ -410,7 +473,7 @@ class TestHarborMasterStaticValue(unittest.TestCase):
         beliefs = infer_beliefs(state, "p0")
         rivals = identify_rivals(state, beliefs, "p0")
 
-        _, punt_part = best_punt_setup(state, beliefs, "p0")
+        best_candidate, punt_part = best_punt_setup(state, beliefs, "p0")
 
         neutral_loaded = list(Ware)[:3]
         neutral_positions = {w: 3 for w in neutral_loaded}
@@ -423,7 +486,9 @@ class TestHarborMasterStaticValue(unittest.TestCase):
             neutral_rise -= expected_black_market_rise_value(neutral_after, beliefs, rival_id)
         neutral_score = neutral_impact.total_rev_after + neutral_rise
 
-        expected = share_buying_value(state) + (punt_part - neutral_score)
+        expected = (
+            share_buying_value(state, beliefs, "p0", planned_punt_setup=best_candidate) + (punt_part - neutral_score)
+        )
         self.assertEqual(harbor_master_static_value(state, beliefs, "p0"), expected)
 
     def test_harbor_master_value_equals_static_plus_first_mover(self):

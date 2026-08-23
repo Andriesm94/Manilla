@@ -5,12 +5,17 @@ Per the user, "is winning harbor master worth it, and how much should I
 bid" breaks into three separately-heuristic-driven value components:
 
 1. `share_buying_value` -- the harbor master's privilege of buying one
-   share at its current black-market price. Valued against a hand-picked,
-   long-horizon *projection* of where that ware's value is eventually
-   headed (`_projected_share_price`) -- deliberately not the same
-   probabilistic, this-voyage-only projection component 2 uses, since
-   this is about the ware's value across the rest of the game, not just
-   what this one voyage's dice do.
+   share at its current black-market price. Coupled with the harbor
+   master's own upcoming punt-loading choice (`best_punt_setup`): a
+   ware's chance of rising *this* voyage is the real dice-based arrival
+   probability of whatever punt position that choice assigns it, and 0
+   for the one ware left ashore (it isn't sailing this voyage at all).
+   On top of that probabilistic first step, per the user, every ware is
+   assumed to rise one further step later in the game regardless
+   (`_share_buying_values`) -- there will be many more voyages after this
+   one. Special case: while every ware is still at 0 (game start), there's
+   no signal to couple with punt positioning at all, so whichever share
+   gets bought is just assumed to be worth 20 eventually.
 2. `best_punt_setup` -- the harbor master's privilege of choosing which 3
    of 4 wares to load and their start positions. Valued exactly via dice
    probabilities, per the user: both the direct effect on ware-punt-
@@ -58,57 +63,118 @@ from manilla.engine.wealth import action_impact, identify_rivals
 # ------------------------------------------------------------------
 
 
-def _projected_share_price(state: GameState, ware: Ware) -> int:
-    """The user's long-horizon heuristic for where `ware`'s black-market
-    value is eventually headed, used only for valuing the share-buying
-    privilege: 0 or 5 -> 20; 20 -> 30; 10 -> 30 if no ware is currently
-    sitting at 20 (nothing is close enough to end the game and cap the
-    climb), else 20 (something else is likely to hit 30 -- the game-ending
-    value -- first, capping how far this one gets to rise)."""
-    value = state.black_market.values[ware]
-    if value in (0, 5):
-        return 20
-    if value == 20:
-        return 30
-    if value == 10:
-        someone_at_20 = any(v == 20 for v in state.black_market.values.values())
-        return 20 if someone_at_20 else 30
-    return value  # already 30 -- the game would already be over
+def _next_black_market_level(value: int) -> int:
+    """One step up the 0-5-10-20-30 track, capped at 30 (the game-ending
+    value -- there's nowhere further to project past it)."""
+    idx = BLACK_MARKET_LEVELS.index(value)
+    return BLACK_MARKET_LEVELS[min(idx + 1, len(BLACK_MARKET_LEVELS) - 1)]
 
 
-def share_buying_value(state: GameState) -> Fraction:
-    """Value of the harbor master's privilege of buying one share: the
-    best (projected eventual price - current price) among every ware
-    still available to buy, per `_projected_share_price`. Floors at 0,
-    since buying is optional -- there's no obligation to take a bad deal.
+def _share_price_gain(from_level: int, to_level: int) -> int:
+    """The change in a share's black-market *price*
+    (`BlackMarket.share_price`'s `max(5, level)`) between two track
+    levels -- 0 between level 0 and 5 (the 5-peso price floor already
+    covers both), 5 between 5 and 10, 10 between 10 and 20 or 20 and 30."""
+    return max(5, to_level) - max(5, from_level)
+
+
+def _share_buying_values(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    p_safe_if_caught: Optional[Numeric] = None,
+    planned_punt_setup: Optional[Tuple[List[Ware], Dict[Ware, int]]] = None,
+) -> Dict[Ware, Fraction]:
+    """Per-ware value of the harbor master's privilege of buying one share
+    at its current price, for every ware still available to buy -- see
+    `share_buying_value` and `best_shares_to_buy`, which both just reduce
+    this dict differently (max value / every tied-best ware).
+
+    While every ware sits at 0 (game start), there's nothing to couple
+    with punt positioning -- every ware is identically placed -- so this
+    just assumes whichever share gets bought is eventually worth 20.
+
+    Otherwise: each ware's chance of rising *this* voyage is 0 unless it's
+    one of the 3 wares `best_punt_setup` actually loads (the ware left
+    ashore can't rise this voyage at all), and otherwise the real
+    dice-based arrival probability of the punt position that choice
+    assigns it (`punt_port_probability`) -- not a flat guess. That
+    probability is multiplied by the one-step price gain
+    (`_share_price_gain`) to get the immediate, this-voyage term. Per the
+    user, on top of that: assume every ware also rises one further step
+    later in the game regardless, since there will be many more voyages
+    after this one -- added as a second, flat (unconditional, not
+    itself probability-weighted) copy of that same one-step gain, since
+    it's a separate, later event from this voyage's own chance. So each
+    ware's total is `(1 + p) * _share_price_gain(current, next_level)`.
     """
-    best = Fraction(0)
+    if all(v == 0 for v in state.black_market.values.values()):
+        return {
+            ware: Fraction(max(0, 20 - state.black_market.share_price(ware)))
+            for ware in Ware
+            if state.shares_available(ware) > 0
+        }
+
+    if planned_punt_setup is None:
+        (wares_loaded, positions), _ = best_punt_setup(state, beliefs, my_id, p_safe_if_caught)
+    else:
+        wares_loaded, positions = planned_punt_setup
+    rounds_remaining = state.movement_rounds_total - state.movement_round_index
+
+    values: Dict[Ware, Fraction] = {}
     for ware in Ware:
         if state.shares_available(ware) <= 0:
             continue
-        price = state.black_market.share_price(ware)
-        projected = _projected_share_price(state, ware)
-        best = max(best, Fraction(projected - price))
-    return best
+        current = state.black_market.values[ware]
+        if current >= BLACK_MARKET_LEVELS[-1]:
+            continue  # already maxed -- the game would already be over
+        gain = _share_price_gain(current, _next_black_market_level(current))
+        p = punt_port_probability(positions[ware], rounds_remaining) if ware in wares_loaded else Fraction(0)
+        values[ware] = (1 + p) * gain
+    return values
 
 
-def best_shares_to_buy(state: GameState) -> List[Ware]:
+def share_buying_value(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    p_safe_if_caught: Optional[Numeric] = None,
+    planned_punt_setup: Optional[Tuple[List[Ware], Dict[Ware, int]]] = None,
+) -> Fraction:
+    """Value of the harbor master's privilege of buying one share: the
+    best value among every ware still available to buy, per
+    `_share_buying_values`. Every value that function produces is already
+    non-negative by construction (the black-market track only ever moves
+    up), so this never needs to floor a bad deal at 0 -- buying is
+    optional, but nothing here can look worse than not buying at all.
+
+    Pass `planned_punt_setup` (the `(wares_loaded, positions)` half of
+    `best_punt_setup`'s return) when the caller has already computed it
+    this turn, to skip recomputing that expensive (~76-candidate)
+    enumeration a second time.
+    """
+    values = _share_buying_values(state, beliefs, my_id, p_safe_if_caught, planned_punt_setup)
+    return max(values.values(), default=Fraction(0))
+
+
+def best_shares_to_buy(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    p_safe_if_caught: Optional[Numeric] = None,
+    planned_punt_setup: Optional[Tuple[List[Ware], Dict[Ware, int]]] = None,
+) -> List[Ware]:
     """Every available ware tied for the best share-buying value -- empty
     if buying isn't worthwhile at all. Per the user, when several tie, the
     actual purchase should be picked randomly among them; this only
     narrows down that tied-best set, it doesn't do the picking."""
-    best = share_buying_value(state)
+    values = _share_buying_values(state, beliefs, my_id, p_safe_if_caught, planned_punt_setup)
+    if not values:
+        return []
+    best = max(values.values())
     if best <= 0:
         return []
-    candidates = []
-    for ware in Ware:
-        if state.shares_available(ware) <= 0:
-            continue
-        price = state.black_market.share_price(ware)
-        projected = _projected_share_price(state, ware)
-        if Fraction(projected - price) == best:
-            candidates.append(ware)
-    return candidates
+    return [ware for ware, value in values.items() if value == best]
 
 
 # ------------------------------------------------------------------
@@ -173,13 +239,9 @@ def expected_black_market_rise_value(state: GameState, beliefs: ShareBeliefs, pl
         if punt.ware is None or punt.status != PuntStatus.ON_ROUTE:
             continue
         current = state.black_market.values[punt.ware]
-        if current not in BLACK_MARKET_LEVELS:
-            continue
-        idx = BLACK_MARKET_LEVELS.index(current)
-        if idx >= len(BLACK_MARKET_LEVELS) - 1:
+        if current >= BLACK_MARKET_LEVELS[-1]:
             continue  # already at 30 -- the game would already be over
-        risen_value = BLACK_MARKET_LEVELS[idx + 1]
-        price_gain = max(5, risen_value) - max(5, current)
+        price_gain = _share_price_gain(current, _next_black_market_level(current))
         p_arrival = punt_port_probability(punt.position, rounds_remaining)
         holdings = assumed_share_count(state, beliefs, player_id, punt.ware)
         total += p_arrival * price_gain * holdings
@@ -357,13 +419,17 @@ def harbor_master_static_value(
     """
     rivals = identify_rivals(state, beliefs, my_id, p_safe_if_caught)
 
-    _, punt_setup_score = best_punt_setup(state, beliefs, my_id, p_safe_if_caught)
+    best_candidate, punt_setup_score = best_punt_setup(state, beliefs, my_id, p_safe_if_caught)
     neutral_loaded, neutral_positions = _neutral_punt_setup(state)
     neutral_score = _punt_setup_score(
         state, beliefs, my_id, neutral_loaded, neutral_positions, rivals, p_safe_if_caught
     )
 
-    return share_buying_value(state) + (punt_setup_score - neutral_score)
+    # Reuse best_candidate as share_buying_value's planned_punt_setup
+    # instead of letting it recompute best_punt_setup a second time --
+    # see share_buying_value's docstring.
+    buying_value = share_buying_value(state, beliefs, my_id, p_safe_if_caught, planned_punt_setup=best_candidate)
+    return buying_value + (punt_setup_score - neutral_score)
 
 
 def harbor_master_value(

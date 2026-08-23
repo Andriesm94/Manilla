@@ -1886,7 +1886,8 @@ class BoardSetupApp(tk.Frame):
         if player.policy == "rev":
             # Ties (equally good options) are broken randomly -- see
             # harbor_master.best_shares_to_buy.
-            candidates = best_shares_to_buy(self.state_obj)
+            beliefs = infer_beliefs(self.state_obj, player.id)
+            candidates = best_shares_to_buy(self.state_obj, beliefs, player.id)
             if candidates:
                 ware = random.choice(candidates)
                 price = self.state_obj.black_market.share_price(ware)
