@@ -41,6 +41,7 @@ game-tree search of the auction.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from fractions import Fraction
 from typing import Callable, Dict, List, Optional, Tuple
 
@@ -388,22 +389,33 @@ def _punt_setup_score(
     return impact.total_rev_after + rise_score
 
 
+@dataclass
+class HarborMasterBidContext:
+    """The board-dependent, bid-to-bid-stable pieces `decide_harbor_master_bid`
+    needs -- see `harbor_master_bid_context`, which builds one of these."""
+
+    static_value: Fraction
+    preferred_share_price: int
+    wares_loaded: List[Ware]
+
+
 def harbor_master_bid_context(
     state: GameState,
     beliefs: ShareBeliefs,
     my_id: str,
     p_safe_if_caught: Optional[Numeric] = None,
-) -> Tuple[Fraction, int]:
-    """The two board-dependent, bid-to-bid-stable pieces `decide_harbor_master_bid`
-    needs -- `harbor_master_static_value` and the price of whichever share
+) -> HarborMasterBidContext:
+    """The board-dependent, bid-to-bid-stable pieces `decide_harbor_master_bid`
+    needs -- `harbor_master_static_value`, the price of whichever share
     `my_id` would go on to buy as harbor master (0 if buying isn't
-    worthwhile). Bundled into one call because both depend on the same
-    expensive `best_punt_setup` enumeration (~76 candidates) and neither
-    changes during a single auction (only who's bidding what does, and
-    the board itself doesn't move while people bid on it) -- compute this
-    once per player per auction and reuse it across every bid decision
-    (`decide_harbor_master_bid`'s `precomputed_bid_context`) rather than
-    recomputing it on every single one-step raise.
+    worthwhile), and which 3 wares `best_punt_setup` would load this
+    voyage. Bundled into one call because all three depend on the same
+    expensive `best_punt_setup` enumeration (~76 candidates) and none of
+    them change during a single auction (only who's bidding what does,
+    and the board itself doesn't move while people bid on it) -- compute
+    this once per player per auction and reuse it across every bid
+    decision (`decide_harbor_master_bid`'s `precomputed_bid_context`)
+    rather than recomputing it on every single one-step raise.
 
     `static_value`'s "marginal" punt-setup component matters here:
     `best_punt_setup`'s raw score is `action_impact`'s `total_rev_after`,
@@ -429,6 +441,7 @@ def harbor_master_bid_context(
     rivals = identify_rivals(state, beliefs, my_id, p_safe_if_caught)
 
     best_candidate, punt_setup_score = best_punt_setup(state, beliefs, my_id, p_safe_if_caught)
+    wares_loaded, _positions = best_candidate
     neutral_loaded, neutral_positions = _neutral_punt_setup(state)
     neutral_score = _punt_setup_score(
         state, beliefs, my_id, neutral_loaded, neutral_positions, rivals, p_safe_if_caught
@@ -443,7 +456,7 @@ def harbor_master_bid_context(
         tied = [ware for ware, value in buying_values.items() if value == buying_value]
         preferred_share_price = max(state.black_market.share_price(ware) for ware in tied)
 
-    return static_value, preferred_share_price
+    return HarborMasterBidContext(static_value, preferred_share_price, wares_loaded)
 
 
 def harbor_master_static_value(
@@ -456,8 +469,29 @@ def harbor_master_static_value(
     `share_buying_value` plus the *marginal* value of `best_punt_setup`'s
     choice. See `harbor_master_bid_context` for the full derivation; this
     is a thin wrapper around it for callers that only need the value, not
-    the bundled preferred-share price."""
-    return harbor_master_bid_context(state, beliefs, my_id, p_safe_if_caught)[0]
+    the rest of the bundled context."""
+    return harbor_master_bid_context(state, beliefs, my_id, p_safe_if_caught).static_value
+
+
+def at_risk_encumbered_share_count(state: GameState, my_id: str, wares_loaded: List[Ware]) -> int:
+    """How many of `my_id`'s encumbered shares are at meaningful risk of
+    the game ending while still encumbered -- already sitting at
+    black-market level 20 (one step from the game-ending 30), or at 10
+    and about to get a push toward 20 because the harbor master's own
+    chosen punt setup this voyage loads that ware. Used only to price the
+    "assume I'll need to urgently unencumber" liquidity cost during
+    bidding -- see `decide_harbor_master_bid`."""
+    player = state.player_by_id(my_id)
+    if player is None:
+        return 0
+    count = 0
+    for share in player.shares:
+        if not share.encumbered:
+            continue
+        level = state.black_market.values[share.ware]
+        if level == 20 or (level == 10 and share.ware in wares_loaded):
+            count += 1
+    return count
 
 
 def harbor_master_value(
@@ -488,7 +522,7 @@ def decide_harbor_master_bid(
     current_highest_bid: int,
     late_cost_per_spot: Numeric,
     p_safe_if_caught: Optional[Numeric] = None,
-    precomputed_bid_context: Optional[Tuple[Numeric, int]] = None,
+    precomputed_bid_context: Optional[HarborMasterBidContext] = None,
 ) -> Optional[int]:
     """Whether, and how much, `my_id` should bid right now: `None` to
     pass, or `current_highest_bid + 1` to raise by exactly one step. Per
@@ -509,28 +543,45 @@ def decide_harbor_master_bid(
     `> next_bid`, not `>=`, so a bid that would only break even isn't
     taken (there's no benefit to winning at a price where the value
     gained equals the price paid, and every further step raises the price
-    without raising the value). Per the user: if paying `next_bid`, *and*
-    then buying the share `my_id` would go on to prefer as harbor master
-    (`harbor_master_bid_context`'s `preferred_share_price`), would drop
-    `my_id`'s cash below 10, assume that means encumbering a share to
-    cover it, which nets a permanent loss of `SHARE_REPAY_AMOUNT -
-    SHARE_LOAN_AMOUNT` pesos (borrow 12 now, repay 15 later) -- so that
-    amount is added to the bid's cost for this comparison only. This is
-    deliberately bidding-only: accomplice placement (`policy.py`) doesn't
-    apply it, since a low-cash accomplice placement doesn't force an
-    encumbrance the same way an auction loss commits real cash right now.
+    without raising the value). Two mutually-exclusive liquidity penalties
+    can raise that cost, per the user:
+
+    - If `my_id` holds any encumbered share at meaningful risk of the
+      game ending while still encumbered (`at_risk_encumbered_share_count`
+      -- already at black-market level 20, or at 10 and about to get a
+      push toward 20 because this voyage's own chosen punt setup loads
+      that ware), assume each such share will need to be urgently
+      unencumbered before the game can end: `SHARE_REPAY_AMOUNT` (15)
+      pesos of imaginary liquidity cost, once per at-risk share.
+    - Otherwise, if paying `next_bid` *and* then buying the share `my_id`
+      would go on to prefer as harbor master
+      (`harbor_master_bid_context`'s `preferred_share_price`) would drop
+      `my_id`'s cash below 10, assume that means encumbering a share to
+      cover it instead, which nets a permanent loss of
+      `SHARE_REPAY_AMOUNT - SHARE_LOAN_AMOUNT` (3) pesos (borrow 12 now,
+      repay 15 later).
+
+    Per the user, these don't stack: an at-risk encumbered share already
+    implies a liquidity concern, so the smaller below-10 cost is skipped
+    whenever the bigger one applies. Both are deliberately bidding-only:
+    accomplice placement (`policy.py`) doesn't apply either, since a
+    low-cash accomplice placement doesn't commit real cash the way an
+    auction loss does right now.
     """
-    static_value, preferred_share_price = (
+    context = (
         harbor_master_bid_context(state, beliefs, my_id, p_safe_if_caught)
         if precomputed_bid_context is None
         else precomputed_bid_context
     )
-    value = static_value + first_mover_value(turn_order, my_id, active_bidder_ids, late_cost_per_spot)
+    value = context.static_value + first_mover_value(turn_order, my_id, active_bidder_ids, late_cost_per_spot)
     next_bid = current_highest_bid + 1
 
     my_player = state.player_by_id(my_id)
     cost = next_bid
-    if my_player is not None and my_player.cash - next_bid - preferred_share_price < 10:
+    at_risk_count = at_risk_encumbered_share_count(state, my_id, context.wares_loaded)
+    if at_risk_count > 0:
+        cost += SHARE_REPAY_AMOUNT * at_risk_count
+    elif my_player is not None and my_player.cash - next_bid - context.preferred_share_price < 10:
         cost += SHARE_REPAY_AMOUNT - SHARE_LOAN_AMOUNT
 
     return next_bid if value > cost else None

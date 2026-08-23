@@ -27,6 +27,7 @@ from manilla.engine.harbor_master import (
     _share_buying_values,
     _share_price_gain,
     apply_punt_setup,
+    at_risk_encumbered_share_count,
     best_punt_setup,
     best_shares_to_buy,
     decide_harbor_master_bid,
@@ -463,7 +464,7 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
         value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
-        _, preferred_share_price = harbor_master_bid_context(state, beliefs, "p0")
+        preferred_share_price = harbor_master_bid_context(state, beliefs, "p0").preferred_share_price
 
         # A next_bid that clears the raw value (value > next_bid) but
         # sits within the assumed penalty of it (value <= next_bid + 3).
@@ -491,7 +492,7 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
         value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
-        _, preferred_share_price = harbor_master_bid_context(state, beliefs, "p0")
+        preferred_share_price = harbor_master_bid_context(state, beliefs, "p0").preferred_share_price
         highest = int(value) - 2
         next_bid = highest + 1
         self.assertLess(state.player_by_id("p0").cash - next_bid - preferred_share_price, 10)
@@ -499,6 +500,34 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         expected_cost = next_bid + (SHARE_REPAY_AMOUNT - SHARE_LOAN_AMOUNT)
         expected = next_bid if value > expected_cost else None
         self.assertEqual(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0), expected)
+
+    def test_at_risk_penalty_replaces_rather_than_stacks_with_below_ten(self):
+        # Per the user, the two liquidity penalties don't stack: an
+        # at-risk encumbered share (15 pesos) is a bigger concern than the
+        # plain below-10-cash one (3 pesos), so when it applies, the
+        # smaller one is skipped entirely -- even if cash would ALSO
+        # trigger it. Confirmed by picking a next_bid that clears
+        # value-minus-15 but would NOT clear value-minus-18 (what
+        # 15 + 3 stacked would require).
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 20
+        state.player_by_id("p0").shares = [Share(ware=Ware.GINSENG, encumbered=True)]
+        beliefs = infer_beliefs(state, "p0")
+        order = ["p0", "p1", "p2"]
+        active = ["p0", "p1", "p2"]
+        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        preferred_share_price = harbor_master_bid_context(state, beliefs, "p0").preferred_share_price
+
+        next_bid = math.floor(value) - 16
+        highest = next_bid - 1
+        self.assertGreater(value, next_bid + 15)
+        self.assertLessEqual(value, next_bid + 15 + 3)
+
+        me = state.player_by_id("p0")
+        # Also below 10 after buying the preferred share -- both penalty
+        # conditions are true here, but only the bigger one should apply.
+        me.cash = next_bid + preferred_share_price + 5
+        self.assertEqual(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0), next_bid)
 
     def test_precomputed_bid_context_gives_the_same_answer(self):
         # The whole point of precomputed_bid_context is to skip
@@ -521,8 +550,8 @@ class TestHarborMasterBidContext(unittest.TestCase):
     def test_static_value_matches_harbor_master_static_value(self):
         state = _make_state()
         beliefs = infer_beliefs(state, "p0")
-        static_value, _ = harbor_master_bid_context(state, beliefs, "p0")
-        self.assertEqual(static_value, harbor_master_static_value(state, beliefs, "p0"))
+        context = harbor_master_bid_context(state, beliefs, "p0")
+        self.assertEqual(context.static_value, harbor_master_static_value(state, beliefs, "p0"))
 
     def test_preferred_share_price_is_the_priciest_tied_best_ware(self):
         state = _make_state()
@@ -532,19 +561,71 @@ class TestHarborMasterBidContext(unittest.TestCase):
         _sell_out(state, Ware.JADE)
         beliefs = infer_beliefs(state, "p0")
         candidates = best_shares_to_buy(state, beliefs, "p0")
-        _, preferred_share_price = harbor_master_bid_context(state, beliefs, "p0")
+        context = harbor_master_bid_context(state, beliefs, "p0")
         if candidates:
-            self.assertEqual(preferred_share_price, max(state.black_market.share_price(w) for w in candidates))
+            self.assertEqual(
+                context.preferred_share_price, max(state.black_market.share_price(w) for w in candidates)
+            )
         else:
-            self.assertEqual(preferred_share_price, 0)
+            self.assertEqual(context.preferred_share_price, 0)
 
     def test_zero_when_buying_is_not_worthwhile(self):
         state = _make_state()
         for w in Ware:
             _sell_out(state, w)
         beliefs = infer_beliefs(state, "p0")
-        _, preferred_share_price = harbor_master_bid_context(state, beliefs, "p0")
-        self.assertEqual(preferred_share_price, 0)
+        context = harbor_master_bid_context(state, beliefs, "p0")
+        self.assertEqual(context.preferred_share_price, 0)
+
+    def test_wares_loaded_matches_best_punt_setups_own_choice(self):
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        (expected_wares_loaded, _), _ = best_punt_setup(state, beliefs, "p0")
+        context = harbor_master_bid_context(state, beliefs, "p0")
+        self.assertEqual(context.wares_loaded, expected_wares_loaded)
+
+
+class TestAtRiskEncumberedShareCount(unittest.TestCase):
+    def test_counts_an_encumbered_share_already_at_twenty(self):
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 20
+        state.player_by_id("p0").shares = [Share(ware=Ware.GINSENG, encumbered=True)]
+        self.assertEqual(at_risk_encumbered_share_count(state, "p0", []), 1)
+
+    def test_counts_an_encumbered_share_at_ten_only_if_its_ware_is_loaded(self):
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 10
+        state.player_by_id("p0").shares = [Share(ware=Ware.GINSENG, encumbered=True)]
+        self.assertEqual(at_risk_encumbered_share_count(state, "p0", [Ware.GINSENG]), 1)
+        self.assertEqual(at_risk_encumbered_share_count(state, "p0", [Ware.NUTMEG]), 0)
+
+    def test_ignores_shares_that_are_not_encumbered(self):
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 20
+        state.player_by_id("p0").shares = [Share(ware=Ware.GINSENG, encumbered=False)]
+        self.assertEqual(at_risk_encumbered_share_count(state, "p0", []), 0)
+
+    def test_ignores_levels_below_the_risk_thresholds(self):
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 5
+        state.player_by_id("p0").shares = [Share(ware=Ware.GINSENG, encumbered=True)]
+        self.assertEqual(at_risk_encumbered_share_count(state, "p0", [Ware.GINSENG]), 0)
+
+    def test_counts_every_qualifying_share_separately(self):
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 20
+        state.black_market.values[Ware.SILK] = 10
+        state.player_by_id("p0").shares = [
+            Share(ware=Ware.GINSENG, encumbered=True),
+            Share(ware=Ware.GINSENG, encumbered=True),
+            Share(ware=Ware.SILK, encumbered=True),
+            Share(ware=Ware.NUTMEG, encumbered=True),  # at 0 -- doesn't qualify
+        ]
+        self.assertEqual(at_risk_encumbered_share_count(state, "p0", [Ware.SILK]), 3)
+
+    def test_zero_for_an_unknown_player(self):
+        state = _make_state()
+        self.assertEqual(at_risk_encumbered_share_count(state, "nobody", []), 0)
 
 
 class TestHarborMasterStaticValue(unittest.TestCase):
