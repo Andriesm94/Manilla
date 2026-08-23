@@ -1715,8 +1715,10 @@ class BoardSetupApp(tk.Frame):
         bid_var = tk.IntVar(value=1)
         bid_spin = ttk.Spinbox(bid_row, from_=1, to=9999, width=6, textvariable=bid_var)
         bid_spin.pack(side=tk.LEFT, padx=6)
-        ttk.Button(bid_row, text="Bid", command=lambda: on_bid()).pack(side=tk.LEFT, padx=4)
-        ttk.Button(bid_row, text="Pass", command=lambda: on_pass()).pack(side=tk.LEFT, padx=4)
+        bid_btn = ttk.Button(bid_row, text="Bid", command=lambda: on_bid())
+        bid_btn.pack(side=tk.LEFT, padx=4)
+        pass_btn = ttk.Button(bid_row, text="Pass", command=lambda: on_pass())
+        pass_btn.pack(side=tk.LEFT, padx=4)
 
         def log(line: str) -> None:
             log_lines.append(line)
@@ -1729,13 +1731,25 @@ class BoardSetupApp(tk.Frame):
             holder = auction["highest_bidder"]
             holder_text = f"{holder.name} ({holder.color})" if holder else "no bids yet"
             cp = current_player()
-            status_var.set(f"Highest bid: {auction['highest_bid']} PESOS - {holder_text}\n\n{cp.name}'s turn ({cp.color})")
+            # A REV bot's first bid of the auction runs best_punt_setup (~76
+            # candidates, roughly a second) before it can answer, so its turn
+            # visibly takes longer than BOT_DELAY_MS's usual quick pacing --
+            # "thinking..." makes that pause read as computation, not a
+            # stall, and the disabled controls below stop an impatient click
+            # from landing on the WRONG player once the bot's turn finally
+            # resolves and the next one begins.
+            turn_text = f"{cp.name} ({cp.color}) is thinking..." if cp.is_bot else f"{cp.name}'s turn ({cp.color})"
+            status_var.set(f"Highest bid: {auction['highest_bid']} PESOS - {holder_text}\n\n{turn_text}")
             # The bid control itself is capped at cash + credit (12 PESOS per
             # unencumbered share) -- can't even type/scroll past what's
             # actually biddable, not just rejected after the fact.
             affordable = cp.cash + SHARE_LOAN_AMOUNT * len(cp.unencumbered_shares)
             bid_spin.configure(to=max(1, affordable))
             bid_var.set(min(auction["highest_bid"] + 1, max(1, affordable)))
+            control_state = "disabled" if cp.is_bot else "normal"
+            bid_spin.configure(state=control_state)
+            bid_btn.configure(state=control_state)
+            pass_btn.configure(state=control_state)
             if cp.is_bot:
                 self.after(BOT_DELAY_MS, bot_take_turn)
 
