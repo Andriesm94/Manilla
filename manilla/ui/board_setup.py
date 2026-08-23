@@ -41,7 +41,7 @@ from manilla.engine.harbor_master import (
     best_punt_setup,
     best_shares_to_buy,
     decide_harbor_master_bid,
-    harbor_master_static_value,
+    harbor_master_bid_context,
 )
 from manilla.engine.policy import choose_accomplice_action
 
@@ -1686,13 +1686,13 @@ class BoardSetupApp(tk.Frame):
         order = players[start_idx:] + players[:start_idx]
 
         auction = {"highest_bid": 0, "highest_bidder": None, "active": list(order), "turn_idx": 0}
-        # Cache of manilla.engine.harbor_master.harbor_master_static_value
+        # Cache of manilla.engine.harbor_master.harbor_master_bid_context
         # per "rev"-policy bidder, computed once on their first turn this
         # auction: it's the expensive part (best_punt_setup enumerates
         # dozens of candidates) but doesn't change bid-to-bid, since the
         # board itself doesn't move while people bid on it -- see
-        # decide_harbor_master_bid's precomputed_static_value.
-        rev_static_value_cache: dict = {}
+        # decide_harbor_master_bid's precomputed_bid_context.
+        rev_bid_context_cache: dict = {}
 
         ttk.Label(
             dialog, text=f"Voyage {self.state_obj.voyage_number}: Harbor Master Auction", font=("Segoe UI", 11, "bold")
@@ -1745,8 +1745,8 @@ class BoardSetupApp(tk.Frame):
 
             if cp.policy == "rev":
                 beliefs = infer_beliefs(self.state_obj, cp.id)
-                if cp.id not in rev_static_value_cache:
-                    rev_static_value_cache[cp.id] = harbor_master_static_value(self.state_obj, beliefs, cp.id)
+                if cp.id not in rev_bid_context_cache:
+                    rev_bid_context_cache[cp.id] = harbor_master_bid_context(self.state_obj, beliefs, cp.id)
                 # Only the first-mover component is recalibrated fresh
                 # every call, against however many bidders are still
                 # active right now -- see decide_harbor_master_bid.
@@ -1758,7 +1758,7 @@ class BoardSetupApp(tk.Frame):
                     [p.id for p in auction["active"]],
                     auction["highest_bid"],
                     self._first_mover_costs.get(cp.id, 1.0),
-                    precomputed_static_value=rev_static_value_cache[cp.id],
+                    precomputed_bid_context=rev_bid_context_cache[cp.id],
                 )
                 if bid_amount is not None and bid_amount <= affordable:
                     on_bid(bid_amount)

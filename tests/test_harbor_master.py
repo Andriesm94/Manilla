@@ -1,3 +1,4 @@
+import math
 import os
 import sys
 from fractions import Fraction
@@ -13,6 +14,8 @@ from manilla.engine.models import (
     Phase,
     Punt,
     PuntStatus,
+    SHARE_LOAN_AMOUNT,
+    SHARE_REPAY_AMOUNT,
     SHARES_PER_WARE,
     Share,
     Ware,
@@ -29,6 +32,7 @@ from manilla.engine.harbor_master import (
     decide_harbor_master_bid,
     expected_black_market_rise_value,
     first_mover_value,
+    harbor_master_bid_context,
     harbor_master_static_value,
     harbor_master_value,
     punt_setup_candidates,
@@ -443,21 +447,104 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         self.assertEqual(full_field, highest + 1 if value_full > highest + 1 else None)
         self.assertEqual(after_p1_passes, highest + 1 if value_after_pass > highest + 1 else None)
 
-    def test_precomputed_static_value_gives_the_same_answer(self):
-        # The whole point of precomputed_static_value is to skip
-        # recomputing harbor_master_static_value on every bid -- confirm
+    def test_encumbrance_penalty_can_flip_a_clearing_bid_to_a_pass(self):
+        # Per the user: if paying the next bid, *and* then buying the
+        # share my_id would go on to prefer as harbor master, would drop
+        # my_id's cash below 10, assume that forces encumbering a share, a
+        # permanent 3-peso loss -- so bidding should refuse a bid that
+        # clears the raw value but not value-minus-3. harbor_master_value
+        # and the preferred share's price don't depend on my_id's own
+        # absolute cash (the former is built entirely from wealth
+        # *differences*; the latter only from market/board state), so
+        # changing p0's cash between the two calls below only exercises
+        # the penalty, not the underlying numbers.
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        order = ["p0", "p1", "p2"]
+        active = ["p0", "p1", "p2"]
+        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        _, preferred_share_price = harbor_master_bid_context(state, beliefs, "p0")
+
+        # A next_bid that clears the raw value (value > next_bid) but
+        # sits within the assumed penalty of it (value <= next_bid + 3).
+        next_bid = math.floor(value) - 2
+        highest = next_bid - 1
+        self.assertGreater(value, next_bid)
+        self.assertLessEqual(value, next_bid + 3)
+
+        me = state.player_by_id("p0")
+        # Winning would leave only 5 pesos after ALSO buying the
+        # preferred share -- below 10.
+        me.cash = next_bid + preferred_share_price + 5
+        self.assertIsNone(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0))
+
+        # Winning would comfortably clear 10 pesos even after that purchase.
+        me.cash = next_bid + preferred_share_price + 50
+        self.assertEqual(
+            decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0), next_bid
+        )
+
+    def test_encumbrance_penalty_matches_share_repay_minus_loan(self):
+        state = _make_state()
+        state.player_by_id("p0").cash = 12
+        beliefs = infer_beliefs(state, "p0")
+        order = ["p0", "p1", "p2"]
+        active = ["p0", "p1", "p2"]
+        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        _, preferred_share_price = harbor_master_bid_context(state, beliefs, "p0")
+        highest = int(value) - 2
+        next_bid = highest + 1
+        self.assertLess(state.player_by_id("p0").cash - next_bid - preferred_share_price, 10)
+
+        expected_cost = next_bid + (SHARE_REPAY_AMOUNT - SHARE_LOAN_AMOUNT)
+        expected = next_bid if value > expected_cost else None
+        self.assertEqual(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0), expected)
+
+    def test_precomputed_bid_context_gives_the_same_answer(self):
+        # The whole point of precomputed_bid_context is to skip
+        # recomputing harbor_master_bid_context on every bid -- confirm
         # it produces an identical decision to the fully-recomputed path.
         state = _make_state()
         beliefs = infer_beliefs(state, "p0")
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
-        static_value = harbor_master_static_value(state, beliefs, "p0")
+        context = harbor_master_bid_context(state, beliefs, "p0")
 
         fresh = decide_harbor_master_bid(state, beliefs, "p0", order, active, 3, 1.5)
         cached = decide_harbor_master_bid(
-            state, beliefs, "p0", order, active, 3, 1.5, precomputed_static_value=static_value
+            state, beliefs, "p0", order, active, 3, 1.5, precomputed_bid_context=context
         )
         self.assertEqual(fresh, cached)
+
+
+class TestHarborMasterBidContext(unittest.TestCase):
+    def test_static_value_matches_harbor_master_static_value(self):
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        static_value, _ = harbor_master_bid_context(state, beliefs, "p0")
+        self.assertEqual(static_value, harbor_master_static_value(state, beliefs, "p0"))
+
+    def test_preferred_share_price_is_the_priciest_tied_best_ware(self):
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 20
+        state.black_market.values[Ware.NUTMEG] = 5
+        _sell_out(state, Ware.SILK)
+        _sell_out(state, Ware.JADE)
+        beliefs = infer_beliefs(state, "p0")
+        candidates = best_shares_to_buy(state, beliefs, "p0")
+        _, preferred_share_price = harbor_master_bid_context(state, beliefs, "p0")
+        if candidates:
+            self.assertEqual(preferred_share_price, max(state.black_market.share_price(w) for w in candidates))
+        else:
+            self.assertEqual(preferred_share_price, 0)
+
+    def test_zero_when_buying_is_not_worthwhile(self):
+        state = _make_state()
+        for w in Ware:
+            _sell_out(state, w)
+        beliefs = infer_beliefs(state, "p0")
+        _, preferred_share_price = harbor_master_bid_context(state, beliefs, "p0")
+        self.assertEqual(preferred_share_price, 0)
 
 
 class TestHarborMasterStaticValue(unittest.TestCase):

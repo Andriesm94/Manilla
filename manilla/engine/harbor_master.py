@@ -53,6 +53,8 @@ from manilla.engine.models import (
     PUNT_START_SUM,
     Punt,
     PuntStatus,
+    SHARE_LOAN_AMOUNT,
+    SHARE_REPAY_AMOUNT,
     Ware,
 )
 from manilla.engine.wealth import action_impact, identify_rivals
@@ -386,36 +388,43 @@ def _punt_setup_score(
     return impact.total_rev_after + rise_score
 
 
-def harbor_master_static_value(
+def harbor_master_bid_context(
     state: GameState,
     beliefs: ShareBeliefs,
     my_id: str,
     p_safe_if_caught: Optional[Numeric] = None,
-) -> Fraction:
-    """The board-dependent components of `harbor_master_value` --
-    `share_buying_value` plus the *marginal* value of `best_punt_setup`'s
-    choice -- deliberately split out because neither one changes during a
-    single auction (only who's bidding what does): the board itself
-    doesn't move while people bid on it. `best_punt_setup` enumerates
-    dozens of candidates and is the expensive part of this whole module by
-    a wide margin, so compute this once per player per auction and reuse
-    it across every bid decision (`decide_harbor_master_bid`'s
-    `precomputed_static_value`) rather than recomputing it on every single
-    one-step raise.
+) -> Tuple[Fraction, int]:
+    """The two board-dependent, bid-to-bid-stable pieces `decide_harbor_master_bid`
+    needs -- `harbor_master_static_value` and the price of whichever share
+    `my_id` would go on to buy as harbor master (0 if buying isn't
+    worthwhile). Bundled into one call because both depend on the same
+    expensive `best_punt_setup` enumeration (~76 candidates) and neither
+    changes during a single auction (only who's bidding what does, and
+    the board itself doesn't move while people bid on it) -- compute this
+    once per player per auction and reuse it across every bid decision
+    (`decide_harbor_master_bid`'s `precomputed_bid_context`) rather than
+    recomputing it on every single one-step raise.
 
-    "Marginal" matters here: `best_punt_setup`'s raw score is
-    `action_impact`'s `total_rev_after`, an *absolute* post-action
-    comparison against every current rival, which (per
-    `wealth.DEFENSIVE_WEALTH_MARGIN`) carries a large, roughly constant
-    negative offset that has nothing to do with punt-setup skill -- it's
-    there whether you choose brilliantly or not at all. Comparing that
-    absolute figure against a real bid price in PESOS would make bidding
-    look worthless even when the underlying board is perfectly biddable
-    (with several rivals, the offset alone can swamp any genuine gain).
-    Subtracting the same score for a non-strategic baseline setup
+    `static_value`'s "marginal" punt-setup component matters here:
+    `best_punt_setup`'s raw score is `action_impact`'s `total_rev_after`,
+    an *absolute* post-action comparison against every current rival,
+    which (per `wealth.DEFENSIVE_WEALTH_MARGIN`) carries a large, roughly
+    constant negative offset that has nothing to do with punt-setup skill
+    -- it's there whether you choose brilliantly or not at all. Comparing
+    that absolute figure against a real bid price in PESOS would make
+    bidding look worthless even when the underlying board is perfectly
+    biddable (with several rivals, the offset alone can swamp any genuine
+    gain). Subtracting the same score for a non-strategic baseline setup
     (`_neutral_punt_setup`) cancels that offset -- it's present in both
     figures identically -- leaving the genuine value of choosing well over
     choosing arbitrarily, which *is* directly comparable to a bid price.
+
+    The preferred share's price is the *most expensive* among every ware
+    tied for `share_buying_value`'s best score -- since the real purchase
+    breaks ties randomly (`best_shares_to_buy`), assuming the priciest one
+    is the defensible worst case for an affordability check, matching the
+    defensive framing `wealth.DEFENSIVE_WEALTH_MARGIN` already uses
+    elsewhere for opponents' unknowns.
     """
     rivals = identify_rivals(state, beliefs, my_id, p_safe_if_caught)
 
@@ -425,11 +434,30 @@ def harbor_master_static_value(
         state, beliefs, my_id, neutral_loaded, neutral_positions, rivals, p_safe_if_caught
     )
 
-    # Reuse best_candidate as share_buying_value's planned_punt_setup
-    # instead of letting it recompute best_punt_setup a second time --
-    # see share_buying_value's docstring.
-    buying_value = share_buying_value(state, beliefs, my_id, p_safe_if_caught, planned_punt_setup=best_candidate)
-    return buying_value + (punt_setup_score - neutral_score)
+    buying_values = _share_buying_values(state, beliefs, my_id, p_safe_if_caught, planned_punt_setup=best_candidate)
+    buying_value = max(buying_values.values(), default=Fraction(0))
+    static_value = buying_value + (punt_setup_score - neutral_score)
+
+    preferred_share_price = 0
+    if buying_value > 0:
+        tied = [ware for ware, value in buying_values.items() if value == buying_value]
+        preferred_share_price = max(state.black_market.share_price(ware) for ware in tied)
+
+    return static_value, preferred_share_price
+
+
+def harbor_master_static_value(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> Fraction:
+    """The board-dependent components of `harbor_master_value` --
+    `share_buying_value` plus the *marginal* value of `best_punt_setup`'s
+    choice. See `harbor_master_bid_context` for the full derivation; this
+    is a thin wrapper around it for callers that only need the value, not
+    the bundled preferred-share price."""
+    return harbor_master_bid_context(state, beliefs, my_id, p_safe_if_caught)[0]
 
 
 def harbor_master_value(
@@ -460,7 +488,7 @@ def decide_harbor_master_bid(
     current_highest_bid: int,
     late_cost_per_spot: Numeric,
     p_safe_if_caught: Optional[Numeric] = None,
-    precomputed_static_value: Optional[Numeric] = None,
+    precomputed_bid_context: Optional[Tuple[Numeric, int]] = None,
 ) -> Optional[int]:
     """Whether, and how much, `my_id` should bid right now: `None` to
     pass, or `current_highest_bid + 1` to raise by exactly one step. Per
@@ -470,24 +498,39 @@ def decide_harbor_master_bid(
     whatever `active_bidder_ids` looks like *then*, since it shrinks every
     time someone passes) rather than reusing an earlier answer.
 
-    Pass `precomputed_static_value` (see `harbor_master_static_value`)
-    once computed for `my_id` in this auction to skip recomputing the
+    Pass `precomputed_bid_context` (see `harbor_master_bid_context`) once
+    computed for `my_id` in this auction to skip recomputing the
     expensive, unchanging share/punt-setup components on every bid --
     only the cheap `first_mover_value` term genuinely needs to be fresh
     each call, since it's the only one that depends on who's still
     bidding.
 
-    Bids the next step exactly when the total value clears it --
-    `> current_highest_bid + 1`, not `>=`, so a bid that would only break
-    even isn't taken (there's no benefit to winning at a price where the
-    value gained equals the price paid, and every further step raises the
-    price without raising the value).
+    Bids the next step exactly when the total value clears its cost --
+    `> next_bid`, not `>=`, so a bid that would only break even isn't
+    taken (there's no benefit to winning at a price where the value
+    gained equals the price paid, and every further step raises the price
+    without raising the value). Per the user: if paying `next_bid`, *and*
+    then buying the share `my_id` would go on to prefer as harbor master
+    (`harbor_master_bid_context`'s `preferred_share_price`), would drop
+    `my_id`'s cash below 10, assume that means encumbering a share to
+    cover it, which nets a permanent loss of `SHARE_REPAY_AMOUNT -
+    SHARE_LOAN_AMOUNT` pesos (borrow 12 now, repay 15 later) -- so that
+    amount is added to the bid's cost for this comparison only. This is
+    deliberately bidding-only: accomplice placement (`policy.py`) doesn't
+    apply it, since a low-cash accomplice placement doesn't force an
+    encumbrance the same way an auction loss commits real cash right now.
     """
-    static_value = (
-        harbor_master_static_value(state, beliefs, my_id, p_safe_if_caught)
-        if precomputed_static_value is None
-        else precomputed_static_value
+    static_value, preferred_share_price = (
+        harbor_master_bid_context(state, beliefs, my_id, p_safe_if_caught)
+        if precomputed_bid_context is None
+        else precomputed_bid_context
     )
     value = static_value + first_mover_value(turn_order, my_id, active_bidder_ids, late_cost_per_spot)
     next_bid = current_highest_bid + 1
-    return next_bid if value > next_bid else None
+
+    my_player = state.player_by_id(my_id)
+    cost = next_bid
+    if my_player is not None and my_player.cash - next_bid - preferred_share_price < 10:
+        cost += SHARE_REPAY_AMOUNT - SHARE_LOAN_AMOUNT
+
+    return next_bid if value > cost else None
