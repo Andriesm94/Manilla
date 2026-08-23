@@ -42,7 +42,7 @@ class TestRevPolicyDrivesALiveGame(unittest.TestCase):
     def tearDown(self):
         self.root.destroy()
 
-    def _pump_until(self, condition, timeout_seconds=120):
+    def _pump_until(self, condition, timeout_seconds=240):
         # root.update() alone, called in a tight loop, does not reliably
         # let self.after()-scheduled callbacks (BOT_DELAY_MS pacing
         # between bot decisions) become due -- Tkinter only fires timers

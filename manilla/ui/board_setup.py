@@ -1568,8 +1568,18 @@ class BoardSetupApp(tk.Frame):
 
         rows_frame = ttk.Frame(dialog)
         color_vars: List[tk.StringVar] = []
-        bot_vars: List[tk.BooleanVar] = []
-        rev_vars: List[tk.BooleanVar] = []
+        # One combobox per row picks all of "is this seat a computer, and
+        # which policy" at once -- deliberately not two independent
+        # checkboxes ("Computer" + "REV policy"). Those let you tick "REV
+        # policy" without also ticking "Computer", which silently left
+        # is_bot False: the seat looked configured for REV but was still
+        # waiting on a human to click Bid/Pass for it every single turn.
+        # A single control makes that combination impossible to produce.
+        SEAT_HUMAN = "Human"
+        SEAT_COMPUTER_RANDOM = "Computer (random)"
+        SEAT_COMPUTER_REV = "Computer (REV)"
+        SEAT_OPTIONS = [SEAT_HUMAN, SEAT_COMPUTER_RANDOM, SEAT_COMPUTER_REV]
+        seat_vars: List[tk.StringVar] = []
 
         error_var = tk.StringVar(value="")
 
@@ -1577,8 +1587,7 @@ class BoardSetupApp(tk.Frame):
             for child in rows_frame.winfo_children():
                 child.destroy()
             color_vars.clear()
-            bot_vars.clear()
-            rev_vars.clear()
+            seat_vars.clear()
             try:
                 count = int(count_var.get())
             except (tk.TclError, ValueError):
@@ -1597,15 +1606,12 @@ class BoardSetupApp(tk.Frame):
                 combo.pack(side=tk.LEFT)
                 color_vars.append(var)
 
-                bot_var = tk.BooleanVar(value=False)
-                ttk.Checkbutton(row, text="Computer", variable=bot_var).pack(side=tk.LEFT, padx=(10, 0))
-                bot_vars.append(bot_var)
-
-                rev_var = tk.BooleanVar(value=False)
-                ttk.Checkbutton(row, text="REV policy (vs. random)", variable=rev_var).pack(
-                    side=tk.LEFT, padx=(6, 0)
+                seat_var = tk.StringVar(value=SEAT_HUMAN)
+                seat_combo = ttk.Combobox(
+                    row, textvariable=seat_var, values=SEAT_OPTIONS, width=17, state="readonly"
                 )
-                rev_vars.append(rev_var)
+                seat_combo.pack(side=tk.LEFT, padx=(10, 0))
+                seat_vars.append(seat_var)
 
         count_spin = ttk.Spinbox(dialog, from_=4, to=5, width=4, textvariable=count_var, command=rebuild_rows)
         count_spin.pack(anchor="w", padx=12)
@@ -1623,9 +1629,10 @@ class BoardSetupApp(tk.Frame):
                 return None
             names = [f"Player {i + 1}" for i in range(len(colors))]
             state = GameState.new_default_game(names, colors=colors)
-            for player, bot_var, rev_var in zip(state.players, bot_vars, rev_vars):
-                player.is_bot = bot_var.get()
-                player.policy = "rev" if rev_var.get() else "random"
+            for player, seat_var in zip(state.players, seat_vars):
+                seat = seat_var.get()
+                player.is_bot = seat != SEAT_HUMAN
+                player.policy = "rev" if seat == SEAT_COMPUTER_REV else "random"
             return state
 
         def on_confirm() -> None:
@@ -1640,14 +1647,13 @@ class BoardSetupApp(tk.Frame):
             self._show_auction_dialog()
 
         def on_simulate_all_bots() -> None:
-            for bot_var in bot_vars:
-                bot_var.set(True)
+            for seat_var in seat_vars:
+                seat_var.set(SEAT_COMPUTER_RANDOM)
             on_confirm()
 
         def on_simulate_all_rev_bots() -> None:
-            for bot_var, rev_var in zip(bot_vars, rev_vars):
-                bot_var.set(True)
-                rev_var.set(True)
+            for seat_var in seat_vars:
+                seat_var.set(SEAT_COMPUTER_REV)
             on_confirm()
 
         btn_row = ttk.Frame(dialog)
