@@ -23,6 +23,7 @@ from manilla.engine.harbor_master import (
     apply_punt_setup,
     best_punt_setup,
     best_shares_to_buy,
+    decide_harbor_master_bid,
     expected_black_market_rise_value,
     first_mover_value,
     harbor_master_value,
@@ -327,6 +328,53 @@ class TestHarborMasterValue(unittest.TestCase):
         _, punt_part = best_punt_setup(state, beliefs, "p0")
         mover_part = first_mover_value(order, "p0", active, 1.0)
         self.assertEqual(total, share_part + punt_part + mover_part)
+
+
+class TestDecideHarborMasterBid(unittest.TestCase):
+    def test_bids_one_step_when_the_value_clears_it(self):
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        order = ["p0", "p1", "p2"]
+        active = ["p0", "p1", "p2"]
+        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+
+        # A highest bid comfortably below the computed value should be
+        # worth raising by exactly one step.
+        highest = int(value) - 5
+        self.assertEqual(
+            decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0),
+            highest + 1,
+        )
+
+    def test_passes_when_the_next_step_would_not_clear_the_value(self):
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        order = ["p0", "p1", "p2"]
+        active = ["p0", "p1", "p2"]
+        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+
+        # A highest bid already at (or past) the value should not be
+        # raised further -- winning at that price wouldn't be worth it.
+        highest = int(value) + 100
+        self.assertIsNone(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0))
+
+    def test_recalibrates_as_active_bidders_shrink(self):
+        # Same board, same highest bid -- but fewer active bidders after
+        # someone passes should change the first-mover component (a
+        # different, possibly farther, nearest active bidder), and so can
+        # change the decision.
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        order = ["p0", "p1", "p2", "p3"]
+        highest = 5
+
+        full_field = decide_harbor_master_bid(state, beliefs, "p0", order, ["p0", "p1", "p2", "p3"], highest, 2.0)
+        after_p1_passes = decide_harbor_master_bid(state, beliefs, "p0", order, ["p0", "p2", "p3"], highest, 2.0)
+        value_full = harbor_master_value(state, beliefs, "p0", order, ["p0", "p1", "p2", "p3"], 2.0)
+        value_after_pass = harbor_master_value(state, beliefs, "p0", order, ["p0", "p2", "p3"], 2.0)
+        self.assertNotEqual(value_full, value_after_pass)
+        self.assertEqual(full_field, highest + 1 if value_full > highest + 1 else None)
+        self.assertEqual(after_p1_passes, highest + 1 if value_after_pass > highest + 1 else None)
 
 
 if __name__ == "__main__":

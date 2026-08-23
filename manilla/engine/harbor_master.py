@@ -308,3 +308,35 @@ def harbor_master_value(
         + punt_setup_score
         + first_mover_value(turn_order, my_id, active_bidder_ids, late_cost_per_spot)
     )
+
+
+def decide_harbor_master_bid(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    turn_order: List[str],
+    active_bidder_ids: List[str],
+    current_highest_bid: int,
+    late_cost_per_spot: Numeric,
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> Optional[int]:
+    """Whether, and how much, `my_id` should bid right now: `None` to
+    pass, or `current_highest_bid + 1` to raise by exactly one step. Per
+    the user, this always increments by a single step rather than jumping
+    straight to some computed "maximum worth it" bid -- call it again
+    fresh every time it's `my_id`'s turn to act (recalibrating
+    `harbor_master_value` against whatever `active_bidder_ids` looks like
+    *then*, since it shrinks every time someone passes) rather than
+    reusing an earlier answer.
+
+    Bids the next step exactly when `harbor_master_value` clears it --
+    `> current_highest_bid + 1`, not `>=`, so a bid that would only break
+    even isn't taken (there's no benefit to winning at a price where the
+    value gained equals the price paid, and every further step raises the
+    price without raising the value).
+    """
+    value = harbor_master_value(
+        state, beliefs, my_id, turn_order, active_bidder_ids, late_cost_per_spot, p_safe_if_caught
+    )
+    next_bid = current_highest_bid + 1
+    return next_bid if value > next_bid else None

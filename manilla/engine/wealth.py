@@ -115,6 +115,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple
 from manilla.engine.beliefs import ShareBeliefs, ShareSignal, infer_beliefs, share_value_estimate
 from manilla.engine.expected_value import (
     Numeric,
+    dock_fill_distribution,
     dock_slot_expected_payout,
     pirate_expected_payout,
     punt_port_probability,
@@ -124,6 +125,7 @@ from manilla.engine.expected_value import (
 from manilla.engine.probability import position_outcomes
 from manilla.engine.models import (
     GameState,
+    INSURANCE_SHIPYARD_COST,
     Phase,
     PIRATE_PRICE,
     PLUNDER_PAYOUTS,
@@ -550,6 +552,99 @@ def apply_pilot_move(punt_id: int, delta: int) -> Callable[[GameState], None]:
             punt.position = SEA_ROUTE_LENGTH
 
     return _apply
+
+
+def apply_dock_slot_placement(dock: str, player_id: str) -> Callable[[GameState], None]:
+    """Build an `action_impact` mutator for placing `player_id` on `dock`
+    ('port' or 'shipyard')'s mandatory-highest-available vacant slot --
+    always the lowest-lettered one (A, then B, then C), paying its price,
+    matching `BoardSetupApp._place_or_remove_dock_accomplice`'s rule that
+    which circle gets clicked doesn't matter. No-ops if every slot is
+    already occupied."""
+    if dock not in ("port", "shipyard"):
+        raise ValueError(f"dock must be 'port' or 'shipyard', got {dock!r}")
+
+    def _apply(state: GameState) -> None:
+        target = state.port if dock == "port" else state.shipyard
+        for key in ("A", "B", "C"):
+            slot = target.slots[key]
+            if slot.occupant is None:
+                slot.occupant = player_id
+                player = state.player_by_id(player_id)
+                if player is not None:
+                    player.cash -= slot.price
+                return
+
+    return _apply
+
+
+def apply_pilot_placement(pilot_size: str, player_id: str) -> Callable[[GameState], None]:
+    """Build an `action_impact` mutator for placing `player_id` on the
+    pilot island's `pilot_size` ('small' or 'large') slot, paying its
+    price. This is the *placement* action -- see `apply_pilot_move` for
+    the separate, later, free movement privilege it grants."""
+    if pilot_size not in ("small", "large"):
+        raise ValueError(f"pilot_size must be 'small' or 'large', got {pilot_size!r}")
+
+    def _apply(state: GameState) -> None:
+        slot = state.pilot_island.small if pilot_size == "small" else state.pilot_island.large
+        slot.occupant = player_id
+        player = state.player_by_id(player_id)
+        if player is not None:
+            player.cash -= slot.price
+
+    return _apply
+
+
+def apply_insurance_placement(player_id: str) -> Callable[[GameState], None]:
+    """Build an `action_impact` mutator for taking the insurance office --
+    an immediate gain of its fixed payment, matching
+    `BoardSetupApp._place_or_remove_insurance`. Doesn't model the future,
+    probabilistic repair cost the holder will owe -- see `insurance_ev`
+    for that, since `wealth_estimate` has no mechanism of its own for a
+    liability that depends on how the rest of the voyage plays out."""
+
+    def _apply(state: GameState) -> None:
+        ins = state.insurance
+        ins.occupant = player_id
+        player = state.player_by_id(player_id)
+        if player is not None:
+            player.cash += ins.payment
+
+    return _apply
+
+
+def insurance_ev(state: GameState) -> Fraction:
+    """Expected net coin return of taking the insurance office: its fixed
+    payment (paid immediately on taking the slot) minus the expected
+    future repair cost, which depends on how many punts end up wrecked in
+    the shipyard by voyage end (`INSURANCE_SHIPYARD_COST`). A punt already
+    `IN_SHIPYARD` counts as a certain wreck; an `ON_ROUTE` punt
+    contributes its own shipwreck probability
+    (`punt_shipyard_probability`); the exact count distribution across all
+    of them is the same Poisson-binomial sum `dock_slot_ev` uses for port/
+    shipyard arrivals (`dock_fill_distribution`), just applied to
+    shipwreck probabilities instead of arrival ones.
+
+    Unlike every other accomplice slot, insurance has no rival effect to
+    weigh -- it's a private financial position, not a competed-for
+    resource -- so this is a plain personal EV number, not a REV one built
+    on `action_impact`.
+    """
+    rounds_remaining = state.movement_rounds_total - state.movement_round_index
+    wreck_probs: List[Numeric] = []
+    for punt in state.punts:
+        if punt.ware is None:
+            continue
+        if punt.status == PuntStatus.IN_SHIPYARD:
+            wreck_probs.append(1)
+        elif punt.status == PuntStatus.ON_ROUTE:
+            wreck_probs.append(punt_shipyard_probability(punt.position, rounds_remaining))
+        # IN_PORT or CAPTURED punts will never wreck -- no contribution.
+
+    dist = dock_fill_distribution(wreck_probs)
+    expected_cost = sum((prob * INSURANCE_SHIPYARD_COST.get(count, 0) for count, prob in dist.items()), Fraction(0))
+    return Fraction(state.insurance.payment) - expected_cost
 
 
 def _combine_actions(*mutators: Callable[[GameState], None]) -> Callable[[GameState], None]:

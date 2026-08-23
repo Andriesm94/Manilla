@@ -8,6 +8,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from manilla.engine.models import (
     AccompliceSlot,
     GameState,
+    INSURANCE_SHIPYARD_COST,
     Phase,
     PLUNDER_PAYOUTS,
     PuntStatus,
@@ -17,22 +18,28 @@ from manilla.engine.models import (
 )
 from manilla.engine.beliefs import ShareSignal, infer_beliefs
 from manilla.engine.expected_value import (
+    dock_fill_distribution,
     dock_slot_expected_payout,
     pirate_expected_payout,
     punt_port_probability,
+    punt_shipyard_probability,
     ware_slot_expected_payout,
 )
 from manilla.engine.probability import position_outcomes
 from manilla.engine.wealth import (
     DEFENSIVE_WEALTH_MARGIN,
     action_impact,
+    apply_dock_slot_placement,
+    apply_insurance_placement,
     apply_pilot_move,
+    apply_pilot_placement,
     apply_pirate_placement,
     apply_ware_slot_placement,
     best_pilot_move,
     encumbered_penalty,
     expected_accomplice_return,
     identify_rivals,
+    insurance_ev,
     occupied_pilot_slots,
     pilot_move_candidates,
     pilot_slot_value,
@@ -630,6 +637,116 @@ class TestApplyPiratePlacement(unittest.TestCase):
     def test_rejects_unknown_role(self):
         with self.assertRaises(ValueError):
             apply_pirate_placement("first-mate", "p0")
+
+
+class TestApplyDockSlotPlacement(unittest.TestCase):
+    def test_occupies_slot_a_first_and_deducts_its_price(self):
+        state = _make_state()
+        apply_dock_slot_placement("port", "p0")(state)
+        self.assertEqual(state.port.slots["A"].occupant, "p0")
+        self.assertEqual(state.players[0].cash, 30 - state.port.slots["A"].price)
+
+    def test_falls_through_to_b_then_c(self):
+        state = _make_state()
+        state.port.slots["A"].occupant = "p1"
+        apply_dock_slot_placement("port", "p0")(state)
+        self.assertEqual(state.port.slots["B"].occupant, "p0")
+
+    def test_shipyard_uses_the_shipyard_slots(self):
+        state = _make_state()
+        apply_dock_slot_placement("shipyard", "p0")(state)
+        self.assertEqual(state.shipyard.slots["A"].occupant, "p0")
+        self.assertIsNone(state.port.slots["A"].occupant)
+
+    def test_noop_when_every_slot_is_occupied(self):
+        state = _make_state()
+        for key in ("A", "B", "C"):
+            state.port.slots[key].occupant = "p1"
+        apply_dock_slot_placement("port", "p0")(state)
+        self.assertEqual(state.players[0].cash, 30)
+
+    def test_rejects_unknown_dock(self):
+        with self.assertRaises(ValueError):
+            apply_dock_slot_placement("harbor", "p0")
+
+
+class TestApplyPilotPlacement(unittest.TestCase):
+    def test_occupies_the_slot_and_deducts_its_price(self):
+        state = _make_state()
+        apply_pilot_placement("small", "p0")(state)
+        self.assertEqual(state.pilot_island.small.occupant, "p0")
+        self.assertEqual(state.players[0].cash, 30 - state.pilot_island.small.price)
+
+    def test_large_slot(self):
+        state = _make_state()
+        apply_pilot_placement("large", "p1")(state)
+        self.assertEqual(state.pilot_island.large.occupant, "p1")
+        self.assertEqual(state.players[1].cash, 30 - state.pilot_island.large.price)
+
+    def test_rejects_unknown_size(self):
+        with self.assertRaises(ValueError):
+            apply_pilot_placement("medium", "p0")
+
+
+class TestApplyInsurancePlacement(unittest.TestCase):
+    def test_occupies_the_office_and_pays_immediately(self):
+        state = _make_state()
+        apply_insurance_placement("p0")(state)
+        self.assertEqual(state.insurance.occupant, "p0")
+        self.assertEqual(state.players[0].cash, 30 + state.insurance.payment)
+
+
+class TestInsuranceEV(unittest.TestCase):
+    def test_matches_a_hand_assembled_computation(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 3
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+
+        p_wreck = punt_shipyard_probability(3, 3)
+        expected = Fraction(10) - p_wreck * 6  # 1 wreck costs 6
+        self.assertEqual(insurance_ev(state), expected)
+
+    def test_a_punt_already_in_the_shipyard_counts_as_a_certain_wreck(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].status = PuntStatus.IN_SHIPYARD
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        self.assertEqual(insurance_ev(state), Fraction(10) - 6)
+
+    def test_a_punt_in_port_or_captured_never_contributes_wreck_risk(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 13
+        state.punts[0].status = PuntStatus.IN_PORT
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        self.assertEqual(insurance_ev(state), Fraction(10))
+
+    def test_no_loaded_punts_gives_the_full_payment(self):
+        state = _make_state()
+        for punt in state.punts:
+            punt.ware = None
+        self.assertEqual(insurance_ev(state), Fraction(10))
+
+    def test_multiple_at_risk_punts_use_the_poisson_binomial_distribution(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 3
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[1].ware = Ware.NUTMEG
+        state.punts[1].position = 2
+        state.punts[1].status = PuntStatus.ON_ROUTE
+        state.punts[2].ware = None
+
+        p1 = punt_shipyard_probability(3, 3)
+        p2 = punt_shipyard_probability(2, 3)
+        dist = dock_fill_distribution([p1, p2])
+        expected_cost = sum(dist.get(k, Fraction(0)) * INSURANCE_SHIPYARD_COST.get(k, 0) for k in (1, 2))
+        self.assertEqual(insurance_ev(state), Fraction(10) - expected_cost)
 
 
 class TestApplyPilotMove(unittest.TestCase):
