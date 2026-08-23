@@ -117,6 +117,14 @@ class BoardSetupApp(tk.Frame):
         # the start of every voyage's auction (_show_auction_dialog), not
         # saved (it's a policy-internal detail, not real game state).
         self._first_mover_costs: dict = {}
+        # Cash movements this voyage that don't happen at round-end
+        # profit distribution -- currently just the insurance occupant's
+        # upfront payment, paid the moment they place (_place_or_remove_
+        # insurance), not when everything else gets paid out. Folded into
+        # the round-end "Voyage profit summary" so it isn't silently
+        # missing from the one notification players actually see; reset
+        # at the start of each voyage (_apply_load_and_place).
+        self._voyage_bonus_payouts: List[Tuple[str, int]] = []
 
         self._build_toolbar()
         self._build_body()
@@ -751,12 +759,14 @@ class BoardSetupApp(tk.Frame):
                 return
             ins.occupant = player.id
             player.cash += ins.payment
+            self._voyage_bonus_payouts.append((player.color, ins.payment))
             self._advance_turn()
         else:
             player = self.state_obj.player_by_id(ins.occupant)
             ins.occupant = None
             if player is not None:
                 player.cash -= ins.payment
+                self._voyage_bonus_payouts.append((player.color, -ins.payment))
 
     def _roll_dice_and_move(self, then: Optional[Callable[[], None]] = None) -> None:
         rolls: dict = {}
@@ -785,13 +795,14 @@ class BoardSetupApp(tk.Frame):
             # still at sea: exactly on 13 with pirates present is plundered;
             # exactly on 13 with no pirates still reaches port; anything
             # short of 13 is shipwrecked to the shipyard.
+            plundered: List[Tuple[str, int]] = []
             for punt in self.state_obj.punts:
                 if punt.ware is None or punt.status != PuntStatus.ON_ROUTE:
                     continue
                 if punt.position == SEA_ROUTE_LENGTH:
                     pb = self.state_obj.pirate_boat
                     if pb.captain.occupant or pb.second.occupant:
-                        self._resolve_plunder(punt)
+                        plundered += self._resolve_plunder(punt)
                     else:
                         key = self._first_available_dock_key(PuntStatus.IN_PORT, exclude_punt=punt)
                         self._dock_punt(punt, PuntStatus.IN_PORT, key)
@@ -799,7 +810,20 @@ class BoardSetupApp(tk.Frame):
                     key = self._first_available_dock_key(PuntStatus.IN_SHIPYARD, exclude_punt=punt)
                     self._dock_punt(punt, PuntStatus.IN_SHIPYARD, key)
 
-            paid = self._pay_port_shipyard_rewards() + self._pay_ware_profits() + self._pay_insurance_cost()
+            # Pirate plunder (paid the instant a punt is caught, above) and
+            # the insurance occupant's upfront payment (paid at placement,
+            # tracked in _voyage_bonus_payouts) both happen outside this
+            # function's own round-end payouts -- fold them in too, so the
+            # one notification players see reflects every cash movement
+            # this voyage, not just what's computed right here.
+            paid = (
+                self._pay_port_shipyard_rewards()
+                + self._pay_ware_profits()
+                + self._pay_insurance_cost()
+                + plundered
+                + self._voyage_bonus_payouts
+            )
+            self._voyage_bonus_payouts = []
             risen = self._raise_ware_values_for_arrivals()
             self.state_obj.phase = Phase.PROFIT_DISTRIBUTION
             message += "\n\nThird movement round complete -- all punts have landed."
@@ -909,16 +933,18 @@ class BoardSetupApp(tk.Frame):
                 risen.append(f"{punt.ware.value.title()}: {before} -> {after}")
         return risen
 
-    def _resolve_plunder(self, punt: Punt) -> None:
+    def _resolve_plunder(self, punt: Punt) -> List[Tuple[str, int]]:
         payout = PLUNDER_PAYOUTS.get(punt.ware, 0)
         pb = self.state_obj.pirate_boat
         pirate_ids = [pid for pid in (pb.captain.occupant, pb.second.occupant) if pid]
+        paid: List[Tuple[str, int]] = []
         if pirate_ids:
             share = payout // len(pirate_ids)
             for pid in pirate_ids:
                 player = self.state_obj.player_by_id(pid)
                 if player is not None:
                     player.cash += share
+                    paid.append((player.color, share))
 
         for slot in punt.ware_slots:
             slot.occupant = None  # accomplices are returned, empty-handed
@@ -941,6 +967,7 @@ class BoardSetupApp(tk.Frame):
         status = PuntStatus.IN_PORT if send_to_port else PuntStatus.IN_SHIPYARD
         key = self._first_available_dock_key(status, exclude_punt=punt)
         self._dock_punt(punt, status, key)
+        return paid
 
     # ------------------------------------------------------------------
     # Pirate boarding (right after the second movement round)
@@ -1937,6 +1964,7 @@ class BoardSetupApp(tk.Frame):
         self.state_obj.phase = Phase.ACCOMPLICE_ROUND
         self.state_obj.current_turn_player_id = harbor_master.id
         self._round_placements = 0
+        self._voyage_bonus_payouts = []
         self.refresh()
         self._maybe_take_bot_turn()
 
