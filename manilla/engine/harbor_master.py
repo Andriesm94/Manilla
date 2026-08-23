@@ -287,6 +287,85 @@ def first_mover_value(
     return Fraction(late_cost_per_spot) * spots * 3
 
 
+def _neutral_punt_setup(state: GameState) -> Tuple[List[Ware], Dict[Ware, int]]:
+    """A non-strategic baseline punt setup -- the first 3 wares in `Ware`'s
+    definition order, at roughly equal positions summing to
+    `PUNT_START_SUM`. Used only to baseline `best_punt_setup`'s score down
+    to a genuine marginal value -- see `harbor_master_static_value`."""
+    loaded = list(Ware)[:3]
+    base, remainder = divmod(PUNT_START_SUM, 3)
+    positions = {loaded[0]: base + remainder, loaded[1]: base, loaded[2]: base}
+    return loaded, positions
+
+
+def _punt_setup_score(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    wares_loaded: List[Ware],
+    positions: Dict[Ware, int],
+    rivals: List[str],
+    p_safe_if_caught: Optional[Numeric],
+) -> Fraction:
+    """`action_impact`'s `total_rev_after` for this one `(wares_loaded,
+    positions)` choice, plus its net expected black-market-rise effect --
+    the same per-candidate scoring formula `best_punt_setup` uses, factored
+    out so `harbor_master_static_value` can apply it to a baseline
+    candidate too."""
+    mutator = apply_punt_setup(wares_loaded, positions)
+    impact = action_impact(state, beliefs, my_id, mutator, p_safe_if_caught)
+
+    after = GameState.from_dict(state.to_dict())
+    mutator(after)
+    rise_score = expected_black_market_rise_value(after, beliefs, my_id)
+    for rival_id in rivals:
+        rise_score -= expected_black_market_rise_value(after, beliefs, rival_id)
+
+    return impact.total_rev_after + rise_score
+
+
+def harbor_master_static_value(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> Fraction:
+    """The board-dependent components of `harbor_master_value` --
+    `share_buying_value` plus the *marginal* value of `best_punt_setup`'s
+    choice -- deliberately split out because neither one changes during a
+    single auction (only who's bidding what does): the board itself
+    doesn't move while people bid on it. `best_punt_setup` enumerates
+    dozens of candidates and is the expensive part of this whole module by
+    a wide margin, so compute this once per player per auction and reuse
+    it across every bid decision (`decide_harbor_master_bid`'s
+    `precomputed_static_value`) rather than recomputing it on every single
+    one-step raise.
+
+    "Marginal" matters here: `best_punt_setup`'s raw score is
+    `action_impact`'s `total_rev_after`, an *absolute* post-action
+    comparison against every current rival, which (per
+    `wealth.DEFENSIVE_WEALTH_MARGIN`) carries a large, roughly constant
+    negative offset that has nothing to do with punt-setup skill -- it's
+    there whether you choose brilliantly or not at all. Comparing that
+    absolute figure against a real bid price in PESOS would make bidding
+    look worthless even when the underlying board is perfectly biddable
+    (with several rivals, the offset alone can swamp any genuine gain).
+    Subtracting the same score for a non-strategic baseline setup
+    (`_neutral_punt_setup`) cancels that offset -- it's present in both
+    figures identically -- leaving the genuine value of choosing well over
+    choosing arbitrarily, which *is* directly comparable to a bid price.
+    """
+    rivals = identify_rivals(state, beliefs, my_id, p_safe_if_caught)
+
+    _, punt_setup_score = best_punt_setup(state, beliefs, my_id, p_safe_if_caught)
+    neutral_loaded, neutral_positions = _neutral_punt_setup(state)
+    neutral_score = _punt_setup_score(
+        state, beliefs, my_id, neutral_loaded, neutral_positions, rivals, p_safe_if_caught
+    )
+
+    return share_buying_value(state) + (punt_setup_score - neutral_score)
+
+
 def harbor_master_value(
     state: GameState,
     beliefs: ShareBeliefs,
@@ -302,12 +381,8 @@ def harbor_master_value(
     bid and what `my_id` would need to bid to win) to decide whether, and
     how much, to bid.
     """
-    _, punt_setup_score = best_punt_setup(state, beliefs, my_id, p_safe_if_caught)
-    return (
-        share_buying_value(state)
-        + punt_setup_score
-        + first_mover_value(turn_order, my_id, active_bidder_ids, late_cost_per_spot)
-    )
+    static_value = harbor_master_static_value(state, beliefs, my_id, p_safe_if_caught)
+    return static_value + first_mover_value(turn_order, my_id, active_bidder_ids, late_cost_per_spot)
 
 
 def decide_harbor_master_bid(
@@ -319,24 +394,34 @@ def decide_harbor_master_bid(
     current_highest_bid: int,
     late_cost_per_spot: Numeric,
     p_safe_if_caught: Optional[Numeric] = None,
+    precomputed_static_value: Optional[Numeric] = None,
 ) -> Optional[int]:
     """Whether, and how much, `my_id` should bid right now: `None` to
     pass, or `current_highest_bid + 1` to raise by exactly one step. Per
     the user, this always increments by a single step rather than jumping
     straight to some computed "maximum worth it" bid -- call it again
-    fresh every time it's `my_id`'s turn to act (recalibrating
-    `harbor_master_value` against whatever `active_bidder_ids` looks like
-    *then*, since it shrinks every time someone passes) rather than
-    reusing an earlier answer.
+    fresh every time it's `my_id`'s turn to act (recalibrating against
+    whatever `active_bidder_ids` looks like *then*, since it shrinks every
+    time someone passes) rather than reusing an earlier answer.
 
-    Bids the next step exactly when `harbor_master_value` clears it --
+    Pass `precomputed_static_value` (see `harbor_master_static_value`)
+    once computed for `my_id` in this auction to skip recomputing the
+    expensive, unchanging share/punt-setup components on every bid --
+    only the cheap `first_mover_value` term genuinely needs to be fresh
+    each call, since it's the only one that depends on who's still
+    bidding.
+
+    Bids the next step exactly when the total value clears it --
     `> current_highest_bid + 1`, not `>=`, so a bid that would only break
     even isn't taken (there's no benefit to winning at a price where the
     value gained equals the price paid, and every further step raises the
     price without raising the value).
     """
-    value = harbor_master_value(
-        state, beliefs, my_id, turn_order, active_bidder_ids, late_cost_per_spot, p_safe_if_caught
+    static_value = (
+        harbor_master_static_value(state, beliefs, my_id, p_safe_if_caught)
+        if precomputed_static_value is None
+        else precomputed_static_value
     )
+    value = static_value + first_mover_value(turn_order, my_id, active_bidder_ids, late_cost_per_spot)
     next_bid = current_highest_bid + 1
     return next_bid if value > next_bid else None

@@ -4,7 +4,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from manilla.engine.models import AccompliceSlot, GameState, Phase, PuntStatus, Ware
+from manilla.engine.models import AccompliceSlot, GameState, Phase, Punt, PuntStatus, Ware
 from manilla.engine.beliefs import infer_beliefs
 from manilla.engine.policy import AccompliceChoice, choose_accomplice_action
 from manilla.engine.wealth import (
@@ -59,22 +59,35 @@ class TestChooseAccompliceAction(unittest.TestCase):
 
         # Independently compute every candidate's score the same way
         # choose_accomplice_action does, and confirm the chosen one is a
-        # genuine max, not just "a" candidate.
+        # genuine max, not just "a" candidate. REV-based candidates
+        # (everything but insurance) are baselined against a no-op's
+        # total_rev_after -- see policy.py's module docstring on why that
+        # baseline has to match for this to be a fair comparison.
+        no_op_baseline = action_impact(state, beliefs, "p0", lambda s: None).total_rev_after
         scores = {}
         for punt in state.punts:
             if punt.ware is None or punt.status != PuntStatus.ON_ROUTE:
                 continue
             if any(s.occupant is None for s in punt.ware_slots):
                 mutator = apply_ware_slot_placement(punt.id, "p0")
-                scores[("ware", punt.id)] = action_impact(state, beliefs, "p0", mutator).total_rev_after
+                scores[("ware", punt.id)] = (
+                    action_impact(state, beliefs, "p0", mutator).total_rev_after - no_op_baseline
+                )
         for dock_name, dock in (("port", state.port), ("shipyard", state.shipyard)):
             mutator = apply_dock_slot_placement(dock_name, "p0")
-            scores[("dock", dock_name)] = action_impact(state, beliefs, "p0", mutator).total_rev_after
-        scores[("pirate", "captain")] = action_impact(
-            state, beliefs, "p0", apply_pirate_placement("captain", "p0")
-        ).total_rev_after
-        scores[("pilot", "small")] = pilot_slot_value(state, beliefs, "p0", "small") - state.pilot_island.small.price
-        scores[("pilot", "large")] = pilot_slot_value(state, beliefs, "p0", "large") - state.pilot_island.large.price
+            scores[("dock", dock_name)] = (
+                action_impact(state, beliefs, "p0", mutator).total_rev_after - no_op_baseline
+            )
+        scores[("pirate", "captain")] = (
+            action_impact(state, beliefs, "p0", apply_pirate_placement("captain", "p0")).total_rev_after
+            - no_op_baseline
+        )
+        scores[("pilot", "small")] = (
+            pilot_slot_value(state, beliefs, "p0", "small") - no_op_baseline - state.pilot_island.small.price
+        )
+        scores[("pilot", "large")] = (
+            pilot_slot_value(state, beliefs, "p0", "large") - no_op_baseline - state.pilot_island.large.price
+        )
         scores[("insurance", None)] = insurance_ev(state)
 
         best_key = max(scores, key=lambda k: scores[k])
@@ -89,6 +102,38 @@ class TestChooseAccompliceAction(unittest.TestCase):
             self.assertEqual(choice.pirate_role, best_id)
         elif best_kind == "pilot":
             self.assertEqual(choice.pilot_size, best_id)
+
+    def test_many_padded_rivals_do_not_bias_everything_toward_insurance(self):
+        # Regression test for the bug this baseline-subtraction fixes:
+        # DEFENSIVE_WEALTH_MARGIN pads every rival's estimate, so with
+        # several rivals present, action_impact's total_rev_after for any
+        # ware/dock/pirate/pilot candidate is dragged deeply negative by a
+        # constant that has nothing to do with the action -- insurance_ev
+        # carries no such offset, so before the fix it would win by
+        # default any time 2+ rivals existed, regardless of whether it
+        # was actually the better choice. A near-certain, uncontested,
+        # well-paying ware placement should still be able to beat a
+        # merely-decent insurance option even with three rivals present.
+        state = GameState.new_default_game(["Me", "P1", "P2", "P3"])
+        for p in state.players:
+            p.shares = []
+        state.players[0].is_harbor_master = True
+        state.phase = Phase.ACCOMPLICE_ROUND
+        state.current_turn_player_id = "p0"
+        state.punts[0].ware = Ware.JADE
+        state.punts[0].ware_slots = Punt.new(0, Ware.JADE).ware_slots
+        state.punts[0].position = 12  # 1 round left, near-certain arrival
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.movement_round_index = 2
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        for p in state.players[1:]:
+            p.cash = 500  # everyone else is a rival
+
+        beliefs = infer_beliefs(state, "p0")
+        choice = choose_accomplice_action(state, beliefs, "p0")
+        self.assertEqual(choice.kind, "ware")
+        self.assertEqual(choice.punt_id, 0)
 
     def test_skips_a_fully_occupied_ware_punt(self):
         state = _make_state()

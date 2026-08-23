@@ -26,10 +26,12 @@ from manilla.engine.harbor_master import (
     decide_harbor_master_bid,
     expected_black_market_rise_value,
     first_mover_value,
+    harbor_master_static_value,
     harbor_master_value,
     punt_setup_candidates,
     share_buying_value,
 )
+from manilla.engine.wealth import action_impact, identify_rivals
 
 
 def _make_state(player_names=("Me", "P1", "P2")):
@@ -316,6 +318,9 @@ class TestFirstMoverValue(unittest.TestCase):
 
 class TestHarborMasterValue(unittest.TestCase):
     def test_sums_all_three_components(self):
+        # The punt-setup component is best_punt_setup's score *net of* a
+        # neutral baseline (see harbor_master_static_value) -- not the raw
+        # score share_buying_value would otherwise be added to directly.
         state = _make_state()
         state.black_market.values[Ware.GINSENG] = 0
         beliefs = infer_beliefs(state, "p0")
@@ -324,10 +329,9 @@ class TestHarborMasterValue(unittest.TestCase):
 
         total = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
 
-        share_part = share_buying_value(state)
-        _, punt_part = best_punt_setup(state, beliefs, "p0")
+        static_part = harbor_master_static_value(state, beliefs, "p0")
         mover_part = first_mover_value(order, "p0", active, 1.0)
-        self.assertEqual(total, share_part + punt_part + mover_part)
+        self.assertEqual(total, static_part + mover_part)
 
 
 class TestDecideHarborMasterBid(unittest.TestCase):
@@ -375,6 +379,61 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         self.assertNotEqual(value_full, value_after_pass)
         self.assertEqual(full_field, highest + 1 if value_full > highest + 1 else None)
         self.assertEqual(after_p1_passes, highest + 1 if value_after_pass > highest + 1 else None)
+
+    def test_precomputed_static_value_gives_the_same_answer(self):
+        # The whole point of precomputed_static_value is to skip
+        # recomputing harbor_master_static_value on every bid -- confirm
+        # it produces an identical decision to the fully-recomputed path.
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        order = ["p0", "p1", "p2"]
+        active = ["p0", "p1", "p2"]
+        static_value = harbor_master_static_value(state, beliefs, "p0")
+
+        fresh = decide_harbor_master_bid(state, beliefs, "p0", order, active, 3, 1.5)
+        cached = decide_harbor_master_bid(
+            state, beliefs, "p0", order, active, 3, 1.5, precomputed_static_value=static_value
+        )
+        self.assertEqual(fresh, cached)
+
+
+class TestHarborMasterStaticValue(unittest.TestCase):
+    def test_matches_share_plus_marginal_punt_setup(self):
+        # The punt-setup component is best_punt_setup's raw score *minus*
+        # the same score for a neutral, non-strategic baseline setup (the
+        # first 3 wares, equal 3/3/3 positions) -- not the raw score
+        # added directly. See harbor_master_static_value's docstring for
+        # why: the raw score alone carries a DEFENSIVE_WEALTH_MARGIN-driven
+        # constant offset that has nothing to do with punt-setup skill,
+        # and the neutral baseline is what cancels it out.
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        rivals = identify_rivals(state, beliefs, "p0")
+
+        _, punt_part = best_punt_setup(state, beliefs, "p0")
+
+        neutral_loaded = list(Ware)[:3]
+        neutral_positions = {w: 3 for w in neutral_loaded}
+        neutral_mutator = apply_punt_setup(neutral_loaded, neutral_positions)
+        neutral_impact = action_impact(state, beliefs, "p0", neutral_mutator)
+        neutral_after = GameState.from_dict(state.to_dict())
+        neutral_mutator(neutral_after)
+        neutral_rise = expected_black_market_rise_value(neutral_after, beliefs, "p0")
+        for rival_id in rivals:
+            neutral_rise -= expected_black_market_rise_value(neutral_after, beliefs, rival_id)
+        neutral_score = neutral_impact.total_rev_after + neutral_rise
+
+        expected = share_buying_value(state) + (punt_part - neutral_score)
+        self.assertEqual(harbor_master_static_value(state, beliefs, "p0"), expected)
+
+    def test_harbor_master_value_equals_static_plus_first_mover(self):
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        order = ["p0", "p1", "p2"]
+        active = ["p0", "p1", "p2"]
+        static_value = harbor_master_static_value(state, beliefs, "p0")
+        mover = first_mover_value(order, "p0", active, 1.0)
+        self.assertEqual(harbor_master_value(state, beliefs, "p0", order, active, 1.0), static_value + mover)
 
 
 if __name__ == "__main__":

@@ -36,6 +36,14 @@ from manilla.engine.models import (
     Share,
     Ware,
 )
+from manilla.engine.beliefs import infer_beliefs
+from manilla.engine.harbor_master import (
+    best_punt_setup,
+    best_shares_to_buy,
+    decide_harbor_master_bid,
+    harbor_master_static_value,
+)
+from manilla.engine.policy import choose_accomplice_action
 
 WARE_COLORS = {
     Ware.NUTMEG: "#8B5A2B",
@@ -103,6 +111,12 @@ class BoardSetupApp(tk.Frame):
         self._click_regions: List[ClickRegion] = []
         self._player_widgets: dict = {}
         self._round_placements = 0  # accomplice placements so far in the current round (session-only, not saved)
+        # Per-voyage random first-mover cost coefficient per player, for
+        # the "rev" policy's harbor-master bidding decision (manilla.
+        # engine.harbor_master.first_mover_value) -- regenerated once at
+        # the start of every voyage's auction (_show_auction_dialog), not
+        # saved (it's a policy-internal detail, not real game state).
+        self._first_mover_costs: dict = {}
 
         self._build_toolbar()
         self._build_body()
@@ -531,6 +545,12 @@ class BoardSetupApp(tk.Frame):
 
     def _bot_take_accomplice_turn(self) -> None:
         state = self.state_obj
+        player = self._current_turn_player()
+
+        if player is not None and player.policy == "rev":
+            self._rev_take_accomplice_turn(player)
+            return
+
         actions: List[Callable[[], None]] = []
 
         for punt in state.punts:
@@ -564,6 +584,44 @@ class BoardSetupApp(tk.Frame):
             # No vacant accomplice space anywhere -- advance the turn
             # without placing so the voyage doesn't stall.
             self._advance_turn()
+
+        self.refresh()
+
+    def _rev_take_accomplice_turn(self, player: Player) -> None:
+        """The "rev" policy's version of `_bot_take_accomplice_turn`:
+        `manilla.engine.policy.choose_accomplice_action` decides *which*
+        placement to make; the actual state change, payment, and turn
+        advance still run through the same tested UI methods every other
+        placement (human or random-bot) goes through -- the policy only
+        ever picks between them, it doesn't duplicate what they do."""
+        state = self.state_obj
+        beliefs = infer_beliefs(state, player.id)
+        choice = choose_accomplice_action(state, beliefs, player.id)
+
+        if choice is None:
+            self._advance_turn()
+            self.refresh()
+            return
+
+        if choice.kind == "ware":
+            punt = next(p for p in state.punts if p.id == choice.punt_id)
+            slot = next(s for s in punt.ware_slots if s.occupant is None)
+            self._place_or_remove_punt_accomplice(punt, slot)
+        elif choice.kind == "dock":
+            dock = state.port if choice.dock == "port" else state.shipyard
+            slot = next(s for s in dock.slots.values() if s.occupant is None)
+            self._place_or_remove_dock_accomplice(dock, slot)
+        elif choice.kind == "pirate":
+            pb = state.pirate_boat
+            if choice.pirate_role == "captain":
+                self._place_or_remove_pirate_slot(pb.captain, False)
+            else:
+                self._place_or_remove_pirate_slot(pb.second, True)
+        elif choice.kind == "pilot":
+            slot = state.pilot_island.small if choice.pilot_size == "small" else state.pilot_island.large
+            self._place_or_remove_accomplice(slot)
+        elif choice.kind == "insurance":
+            self._place_or_remove_insurance()
 
         self.refresh()
 
@@ -1511,6 +1569,7 @@ class BoardSetupApp(tk.Frame):
         rows_frame = ttk.Frame(dialog)
         color_vars: List[tk.StringVar] = []
         bot_vars: List[tk.BooleanVar] = []
+        rev_vars: List[tk.BooleanVar] = []
 
         error_var = tk.StringVar(value="")
 
@@ -1519,6 +1578,7 @@ class BoardSetupApp(tk.Frame):
                 child.destroy()
             color_vars.clear()
             bot_vars.clear()
+            rev_vars.clear()
             try:
                 count = int(count_var.get())
             except (tk.TclError, ValueError):
@@ -1538,10 +1598,14 @@ class BoardSetupApp(tk.Frame):
                 color_vars.append(var)
 
                 bot_var = tk.BooleanVar(value=False)
-                ttk.Checkbutton(row, text="Computer (random policy)", variable=bot_var).pack(
-                    side=tk.LEFT, padx=(10, 0)
-                )
+                ttk.Checkbutton(row, text="Computer", variable=bot_var).pack(side=tk.LEFT, padx=(10, 0))
                 bot_vars.append(bot_var)
+
+                rev_var = tk.BooleanVar(value=False)
+                ttk.Checkbutton(row, text="REV policy (vs. random)", variable=rev_var).pack(
+                    side=tk.LEFT, padx=(6, 0)
+                )
+                rev_vars.append(rev_var)
 
         count_spin = ttk.Spinbox(dialog, from_=4, to=5, width=4, textvariable=count_var, command=rebuild_rows)
         count_spin.pack(anchor="w", padx=12)
@@ -1559,8 +1623,9 @@ class BoardSetupApp(tk.Frame):
                 return None
             names = [f"Player {i + 1}" for i in range(len(colors))]
             state = GameState.new_default_game(names, colors=colors)
-            for player, bot_var in zip(state.players, bot_vars):
+            for player, bot_var, rev_var in zip(state.players, bot_vars, rev_vars):
                 player.is_bot = bot_var.get()
+                player.policy = "rev" if rev_var.get() else "random"
             return state
 
         def on_confirm() -> None:
@@ -1579,10 +1644,19 @@ class BoardSetupApp(tk.Frame):
                 bot_var.set(True)
             on_confirm()
 
+        def on_simulate_all_rev_bots() -> None:
+            for bot_var, rev_var in zip(bot_vars, rev_vars):
+                bot_var.set(True)
+                rev_var.set(True)
+            on_confirm()
+
         btn_row = ttk.Frame(dialog)
         btn_row.pack(pady=(4, 12))
         ttk.Button(btn_row, text="Confirm", command=on_confirm).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_row, text="Simulate (all computers)", command=on_simulate_all_bots).pack(
+            side=tk.LEFT, padx=4
+        )
+        ttk.Button(btn_row, text="Simulate (all REV computers)", command=on_simulate_all_rev_bots).pack(
             side=tk.LEFT, padx=4
         )
 
@@ -1592,6 +1666,12 @@ class BoardSetupApp(tk.Frame):
         players = self.state_obj.players
         if not players:
             return
+
+        # Fresh per-voyage first-mover cost coefficient for every player
+        # (manilla.engine.harbor_master.first_mover_value) -- regenerated
+        # once here, at the start of each voyage's auction, and reused for
+        # every bidding decision made during it.
+        self._first_mover_costs = {p.id: random.uniform(0.5, 2.0) for p in players}
 
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title(f"Voyage {self.state_obj.voyage_number} - Harbor Master Auction")
@@ -1606,6 +1686,13 @@ class BoardSetupApp(tk.Frame):
         order = players[start_idx:] + players[:start_idx]
 
         auction = {"highest_bid": 0, "highest_bidder": None, "active": list(order), "turn_idx": 0}
+        # Cache of manilla.engine.harbor_master.harbor_master_static_value
+        # per "rev"-policy bidder, computed once on their first turn this
+        # auction: it's the expensive part (best_punt_setup enumerates
+        # dozens of candidates) but doesn't change bid-to-bid, since the
+        # board itself doesn't move while people bid on it -- see
+        # decide_harbor_master_bid's precomputed_static_value.
+        rev_static_value_cache: dict = {}
 
         ttk.Label(
             dialog, text=f"Voyage {self.state_obj.voyage_number}: Harbor Master Auction", font=("Segoe UI", 11, "bold")
@@ -1655,6 +1742,30 @@ class BoardSetupApp(tk.Frame):
         def bot_take_turn() -> None:
             cp = current_player()
             affordable = cp.cash + SHARE_LOAN_AMOUNT * len(cp.unencumbered_shares)
+
+            if cp.policy == "rev":
+                beliefs = infer_beliefs(self.state_obj, cp.id)
+                if cp.id not in rev_static_value_cache:
+                    rev_static_value_cache[cp.id] = harbor_master_static_value(self.state_obj, beliefs, cp.id)
+                # Only the first-mover component is recalibrated fresh
+                # every call, against however many bidders are still
+                # active right now -- see decide_harbor_master_bid.
+                bid_amount = decide_harbor_master_bid(
+                    self.state_obj,
+                    beliefs,
+                    cp.id,
+                    [p.id for p in order],
+                    [p.id for p in auction["active"]],
+                    auction["highest_bid"],
+                    self._first_mover_costs.get(cp.id, 1.0),
+                    precomputed_static_value=rev_static_value_cache[cp.id],
+                )
+                if bid_amount is not None and bid_amount <= affordable:
+                    on_bid(bid_amount)
+                else:
+                    on_pass()
+                return
+
             # Random policy: pick a number 1-20; bid it if that's a valid
             # raise they can afford, otherwise pass.
             candidate = random.randint(1, 20)
@@ -1772,6 +1883,19 @@ class BoardSetupApp(tk.Frame):
         ttk.Button(btn_row, text="Skip", command=resolve).pack(side=tk.LEFT, padx=4)
 
     def _bot_buy_share(self, player: Player, available: List[Ware], then: Callable[[], None]) -> None:
+        if player.policy == "rev":
+            # Ties (equally good options) are broken randomly -- see
+            # harbor_master.best_shares_to_buy.
+            candidates = best_shares_to_buy(self.state_obj)
+            if candidates:
+                ware = random.choice(candidates)
+                price = self.state_obj.black_market.share_price(ware)
+                if self._settle_payment(player, price):
+                    player.shares.append(Share(ware=ware))
+                    self.refresh()
+            then()
+            return
+
         if random.random() < 0.5:
             ware = random.choice(available)
             price = self.state_obj.black_market.share_price(ware)
@@ -1796,6 +1920,12 @@ class BoardSetupApp(tk.Frame):
         self._maybe_take_bot_turn()
 
     def _bot_load_and_place(self, harbor_master: Player) -> None:
+        if harbor_master.policy == "rev":
+            beliefs = infer_beliefs(self.state_obj, harbor_master.id)
+            (loaded, positions), _ = best_punt_setup(self.state_obj, beliefs, harbor_master.id)
+            self._apply_load_and_place(harbor_master, loaded, positions)
+            return
+
         wares = list(Ware)
         random.shuffle(wares)
         loaded = wares[:3]
