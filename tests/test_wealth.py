@@ -10,6 +10,7 @@ from manilla.engine.models import (
     GameState,
     INSURANCE_SHIPYARD_COST,
     Phase,
+    PIRATE_PRICE,
     PLUNDER_PAYOUTS,
     PuntStatus,
     SHARE_REPAY_AMOUNT,
@@ -44,6 +45,7 @@ from manilla.engine.wealth import (
     pilot_move_candidates,
     pilot_slot_value,
     pirate_captain_boarding_bonus,
+    pirate_slot_ev_if_taken_now,
     pirate_threat,
     predict_pilot_move,
     project_final_occupancy,
@@ -372,6 +374,40 @@ class TestPirateThreat(unittest.TestCase):
         state = _make_state()
         state.pirate_boat.second.occupant = "p1"
         self.assertEqual(pirate_threat(state), 0)
+
+
+class TestPirateSlotEvIfTakenNow(unittest.TestCase):
+    def test_empty_boat_values_taking_the_captain_role(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.JADE
+        state.punts[0].position = 6
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        p_caught = position_outcomes(6, state.movement_rounds_total - state.movement_round_index)["caught_on_13"]
+        expected = p_caught * PLUNDER_PAYOUTS[Ware.JADE] - PIRATE_PRICE
+        self.assertEqual(pirate_slot_ev_if_taken_now(state), expected)
+
+    def test_captain_already_aboard_values_taking_the_second_role_as_a_two_way_split(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.JADE
+        state.punts[0].position = 6
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.pirate_boat.captain.occupant = "p0"
+
+        p_caught = position_outcomes(6, state.movement_rounds_total - state.movement_round_index)["caught_on_13"]
+        expected = p_caught * (PLUNDER_PAYOUTS[Ware.JADE] // 2) - PIRATE_PRICE
+        self.assertEqual(pirate_slot_ev_if_taken_now(state), expected)
+
+    def test_none_when_the_boat_is_already_fully_crewed(self):
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p0"
+        state.pirate_boat.second.occupant = "p1"
+        self.assertIsNone(pirate_slot_ev_if_taken_now(state))
+
+    def test_ignores_punts_that_are_not_on_route(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.JADE
+        state.punts[0].status = PuntStatus.IN_PORT
+        self.assertEqual(pirate_slot_ev_if_taken_now(state), -PIRATE_PRICE)
 
 
 class TestPirateCaptainBoardingBonus(unittest.TestCase):

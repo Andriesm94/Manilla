@@ -119,6 +119,7 @@ from manilla.engine.expected_value import (
     dock_fill_distribution,
     dock_slot_expected_payout,
     pirate_expected_payout,
+    pirate_slot_ev,
     punt_port_probability,
     punt_shipyard_probability,
     ware_slot_expected_payout,
@@ -326,6 +327,36 @@ def expected_accomplice_return(
             total += pirate_captain_boarding_bonus(state)
 
     return total
+
+
+def pirate_slot_ev_if_taken_now(state: GameState) -> Optional[Fraction]:
+    """The plain EV (`expected_value.pirate_slot_ev`, `PIRATE_PRICE`
+    already netted out) of taking whichever pirate role is next to fill --
+    captain if vacant, otherwise second, matching `BoardSetupApp._place_
+    or_remove_pirate_slot`'s "captain always fills first" rule. `None` if
+    the boat is already fully crewed (nothing left to take).
+
+    Deliberately *not* REV: this is the same player-independent number the
+    REV-based pirate candidate in `policy.py` nets its own baseline
+    against, useful on its own for a human to see what the raw payoff
+    looks like -- e.g. for understanding why a bot took the pirate slot
+    when it doesn't look, on its face, like the biggest number on the
+    board (REV's rival-hurting term can make a modest-EV action still be
+    the highest-REV one).
+    """
+    pb = state.pirate_boat
+    if pb.captain.occupant is None:
+        pirate_count = 1
+    elif pb.second.occupant is None:
+        pirate_count = 2
+    else:
+        return None
+    punts = [
+        (p.ware, p.position, _rounds_remaining(state))
+        for p in state.punts
+        if p.ware is not None and p.status == PuntStatus.ON_ROUTE
+    ]
+    return pirate_slot_ev(punts, pirate_count)
 
 
 #: Defensive margin added to every *opponent's* wealth_estimate (never the

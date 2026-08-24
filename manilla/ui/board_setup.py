@@ -44,6 +44,7 @@ from manilla.engine.harbor_master import (
     harbor_master_bid_context,
 )
 from manilla.engine.policy import choose_accomplice_action
+from manilla.engine.wealth import pirate_slot_ev_if_taken_now
 
 WARE_COLORS = {
     Ware.NUTMEG: "#8B5A2B",
@@ -1560,6 +1561,20 @@ class BoardSetupApp(tk.Frame):
 
             self._draw_accomplice_circle(cx, MISC_ROW_Y, BIG_SLOT_RADIUS, slot.occupant, make_cb())
             self._draw_slot_price_if_vacant(cx, MISC_ROW_Y, slot)
+
+        # The plain EV (not REV) of taking whichever pirate role is next
+        # to fill -- what the "pc" actually weighs the PIRATE_PRICE
+        # against, shown so a human can see the raw number behind a bot's
+        # decision instead of only its outcome.
+        ev = pirate_slot_ev_if_taken_now(self.state_obj)
+        if ev is not None:
+            c.create_text(
+                PIRATE_X + 35,
+                MISC_ROW_Y + BIG_SLOT_RADIUS + 14,
+                text=f"EV: {float(ev):+.1f}",
+                font=("Segoe UI", 8),
+                fill="#555555",
+            )
 
     def _place_or_remove_pirate_slot(self, slot: AccompliceSlot, is_second: bool) -> None:
         """A new pirate accomplice always becomes the captain -- clicking
