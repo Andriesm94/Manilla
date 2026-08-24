@@ -521,7 +521,7 @@ class BoardSetupApp(tk.Frame):
             self._round_placements = 0
             if self.state_obj.movement_round_index == 2:
                 # Pilots act just before the third (final) movement round.
-                self._show_pilot_dialogs(self._finish_round_end_roll)
+                self._show_pilot_dialogs(self._show_punt_standings_before_final_roll)
             else:
                 self._finish_round_end_roll()
         else:
@@ -529,6 +529,35 @@ class BoardSetupApp(tk.Frame):
             idx = players.index(current) if current in players else 0
             self.state_obj.current_turn_player_id = players[(idx + 1) % len(players)].id
             self._maybe_take_bot_turn()
+
+    def _punt_standings_lines(self) -> List[str]:
+        """Called right before the third and final roll -- a punt can only
+        ever be ON_ROUTE (still sailing) or IN_PORT (arrived early, having
+        overshot 13 in an earlier round) at this point. Shipwrecks are only
+        ever decided by that final roll itself, so IN_SHIPYARD can't happen
+        yet."""
+        lines = []
+        for punt in self.state_obj.punts:
+            if punt.ware is None:
+                continue
+            label = punt.ware.value.title()
+            if punt.status == PuntStatus.ON_ROUTE:
+                lines.append(f"{label}: space {punt.position} of {SEA_ROUTE_LENGTH}")
+            elif punt.status == PuntStatus.IN_PORT:
+                lines.append(f"{label}: already in port")
+        return lines
+
+    def _show_punt_standings_before_final_roll(self) -> None:
+        """The pilot phase has just resolved -- show exactly where every
+        punt sits before the mandatory third and final dice throw."""
+        all_bots = bool(self.state_obj.players) and all(p.is_bot for p in self.state_obj.players)
+        if not all_bots:
+            messagebox.showinfo(
+                "Punt standings before the final roll",
+                "Pilot phase complete. Standings before the third and final dice throw:\n\n"
+                + "\n".join(self._punt_standings_lines()),
+            )
+        self._finish_round_end_roll()
 
     def _finish_round_end_roll(self) -> None:
         # The dice roll may itself open pirate-boarding dialogs (round 2) --

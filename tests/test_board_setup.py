@@ -496,5 +496,60 @@ class TestPirateSlotPlacementInvariant(TkTestCase):
         self.assertEqual(second_player.cash, cash_before + pb.second.price)
 
 
+class TestPuntStandingsNotification(TkTestCase):
+    """An explicit notification reports where every punt sits right after
+    the pilot phase resolves, before the mandatory third and final roll."""
+
+    def test_standings_message_lists_each_loaded_punt(self):
+        """Only ON_ROUTE and IN_PORT are reachable states at this point --
+        shipwrecks are decided by the final roll itself, so a punt can
+        never already be in the shipyard here."""
+        self.make_punt(0, Ware.NUTMEG, 9)
+        self.make_punt(1, Ware.SILK, SEA_ROUTE_LENGTH)
+        self.state.punts[1].status = PuntStatus.IN_PORT  # arrived early, overshot 13 in an earlier round
+        self.make_punt(2, Ware.GINSENG, 4)
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo, mock.patch(
+            "manilla.ui.board_setup.random.randint", return_value=1
+        ):
+            self.app._show_punt_standings_before_final_roll()
+
+        title, body = showinfo.call_args_list[0].args
+        self.assertIn("Punt standings", title)
+        self.assertIn("Nutmeg: space 9 of 13", body)
+        self.assertIn("Silk: already in port", body)
+        self.assertIn("Ginseng: space 4 of 13", body)
+
+    def test_standings_shown_after_pilots_and_before_the_roll(self):
+        punt = self.make_punt(0, Ware.NUTMEG, 12)
+        self.state.pilot_island.small.occupant = self.state.players[3].id
+        self.state.movement_round_index = 2
+        self.app._round_placements = len(self.state.players) - 1
+
+        calls = []
+        with mock.patch(
+            "manilla.ui.board_setup.messagebox.showinfo", side_effect=lambda title, body: calls.append(title)
+        ):
+            self.app._place_or_remove_accomplice(self.state.port.slots["A"])
+            self.root.update()
+            dlg = self.find_toplevels("Small Pilot")[0]
+            combos = [w for w in self.all_widgets(dlg) if w.winfo_class() == "TCombobox"]
+            combos[0].set(f"Punt {punt.id} ({punt.ware.value}, at space {punt.position})")
+            with mock.patch("manilla.ui.board_setup.random.randint", return_value=1):
+                self.button_in(dlg, "forward").invoke()
+            self.root.update()
+
+        self.assertEqual(calls, ["Punt standings before the final roll", "Punts move"], "standings, then the roll")
+
+    def test_no_blocking_dialog_in_an_all_bot_game(self):
+        for p in self.state.players:
+            p.is_bot = True
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
+            self.app._show_punt_standings_before_final_roll()
+
+        showinfo.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
