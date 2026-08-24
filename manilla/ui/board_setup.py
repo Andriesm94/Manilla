@@ -44,7 +44,7 @@ from manilla.engine.harbor_master import (
     harbor_master_bid_context,
 )
 from manilla.engine.policy import choose_accomplice_action
-from manilla.engine.wealth import pirate_slot_ev_if_taken_now
+from manilla.engine.wealth import pirate_captain_boarding_bonus, pirate_slot_ev_if_taken_now
 
 WARE_COLORS = {
     Ware.NUTMEG: "#8B5A2B",
@@ -1565,13 +1565,24 @@ class BoardSetupApp(tk.Frame):
         # The plain EV (not REV) of taking whichever pirate role is next
         # to fill -- what the "pc" actually weighs the PIRATE_PRICE
         # against, shown so a human can see the raw number behind a bot's
-        # decision instead of only its outcome.
+        # decision instead of only its outcome. For the captain
+        # specifically this includes the free mid-voyage boarding bonus
+        # (pirate_captain_boarding_bonus) -- broken out explicitly here
+        # since it's easy to read the plunder-only figure as "the" EV and
+        # then not see why captain still wins; early in a voyage the
+        # boarding bonus is routinely the *larger* of the two terms.
         ev = pirate_slot_ev_if_taken_now(self.state_obj)
         if ev is not None:
+            boarding = (
+                pirate_captain_boarding_bonus(self.state_obj) if self.state_obj.pirate_boat.captain.occupant is None else 0
+            )
+            text = f"EV: {float(ev):+.1f}"
+            if boarding:
+                text += f" (boarding +{float(boarding):.1f})"
             c.create_text(
                 PIRATE_X + 35,
                 MISC_ROW_Y + BIG_SLOT_RADIUS + 14,
-                text=f"EV: {float(ev):+.1f}",
+                text=text,
                 font=("Segoe UI", 8),
                 fill="#555555",
             )

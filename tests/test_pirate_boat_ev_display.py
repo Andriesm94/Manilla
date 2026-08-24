@@ -13,7 +13,7 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manilla.ui.board_setup import BoardSetupApp
-from manilla.engine.models import GameState, PuntStatus, Ware
+from manilla.engine.models import GameState, Punt, PuntStatus, Ware
 
 
 class TestPirateBoatEvDisplay(unittest.TestCase):
@@ -44,6 +44,21 @@ class TestPirateBoatEvDisplay(unittest.TestCase):
         self.app.refresh()
 
         self.assertTrue(any(t.startswith("EV:") for t in self._canvas_texts()))
+
+    def test_ev_line_breaks_out_the_captains_boarding_bonus(self):
+        # Regression test for the user's bug report: the displayed EV used
+        # to omit pirate_captain_boarding_bonus entirely, making the
+        # number on the board look much smaller than what actually drove
+        # a bot to take the captain's seat first.
+        punt = self.state.punts[0]
+        punt.ware = Ware.JADE
+        punt.ware_slots = Punt.new(punt.id, Ware.JADE).ware_slots
+        punt.status = PuntStatus.ON_ROUTE
+        punt.position = 6
+        self.state.movement_round_index = 0
+        self.app.refresh()
+
+        self.assertTrue(any("boarding +" in t for t in self._canvas_texts()))
 
     def test_no_ev_line_once_the_boat_is_fully_crewed(self):
         self.state.pirate_boat.captain.occupant = self.state.players[0].id

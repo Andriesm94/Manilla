@@ -336,19 +336,31 @@ def pirate_slot_ev_if_taken_now(state: GameState) -> Optional[Fraction]:
     or_remove_pirate_slot`'s "captain always fills first" rule. `None` if
     the boat is already fully crewed (nothing left to take).
 
-    Deliberately *not* REV: this is the same player-independent number the
-    REV-based pirate candidate in `policy.py` nets its own baseline
-    against, useful on its own for a human to see what the raw payoff
-    looks like -- e.g. for understanding why a bot took the pirate slot
-    when it doesn't look, on its face, like the biggest number on the
-    board (REV's rival-hurting term can make a modest-EV action still be
-    the highest-REV one).
+    For the captain role specifically, this also adds
+    `pirate_captain_boarding_bonus` -- the captain-only free mid-voyage
+    boarding opportunity (see that function's docstring) that
+    `expected_accomplice_return` folds into the captain's own wealth the
+    moment they board, and which the REV-based pirate candidate in
+    `policy.py` is scored against via `action_impact`. Leaving it out here
+    would make this number look far smaller than what the decision engine
+    is actually weighing -- early in a voyage that bonus is routinely the
+    *larger* of the two terms, which is exactly what can make taking the
+    captain's seat look like a modest play by plunder EV alone while
+    actually being the clear best move once boarding is counted too.
+
+    Deliberately *not* REV, though: this is still just the player-
+    independent payoff, not netted against any rival's wealth change --
+    the REV-based candidate can additionally outrank (or underrank) this
+    number by hurting (or not touching) a rival, which this figure alone
+    won't explain.
     """
     pb = state.pirate_boat
     if pb.captain.occupant is None:
         pirate_count = 1
+        is_captain = True
     elif pb.second.occupant is None:
         pirate_count = 2
+        is_captain = False
     else:
         return None
     punts = [
@@ -356,7 +368,10 @@ def pirate_slot_ev_if_taken_now(state: GameState) -> Optional[Fraction]:
         for p in state.punts
         if p.ware is not None and p.status == PuntStatus.ON_ROUTE
     ]
-    return pirate_slot_ev(punts, pirate_count)
+    ev = pirate_slot_ev(punts, pirate_count)
+    if is_captain:
+        ev += pirate_captain_boarding_bonus(state)
+    return ev
 
 
 #: Defensive margin added to every *opponent's* wealth_estimate (never the

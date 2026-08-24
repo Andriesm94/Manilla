@@ -12,6 +12,7 @@ from manilla.engine.models import (
     Phase,
     PIRATE_PRICE,
     PLUNDER_PAYOUTS,
+    Punt,
     PuntStatus,
     SHARE_REPAY_AMOUNT,
     Share,
@@ -408,6 +409,42 @@ class TestPirateSlotEvIfTakenNow(unittest.TestCase):
         state.punts[0].ware = Ware.JADE
         state.punts[0].status = PuntStatus.IN_PORT
         self.assertEqual(pirate_slot_ev_if_taken_now(state), -PIRATE_PRICE)
+
+    def test_captain_role_includes_the_free_boarding_bonus(self):
+        # Regression test: this is exactly what the user's own bug report
+        # traced -- the board's displayed pirate EV looked much smaller
+        # than what the bot actually acted on, because
+        # pirate_captain_boarding_bonus (often the *larger* of the two
+        # terms early in a voyage) was missing from it entirely.
+        state = _make_state()
+        state.movement_round_index = 0  # boarding opportunity still ahead
+        punt = state.punts[0]
+        punt.ware = Ware.JADE
+        punt.ware_slots = Punt.new(punt.id, Ware.JADE).ware_slots  # real vacant slots
+        punt.status = PuntStatus.ON_ROUTE
+        punt.position = 6
+
+        p_caught = position_outcomes(6, state.movement_rounds_total - state.movement_round_index)["caught_on_13"]
+        plunder_ev = p_caught * PLUNDER_PAYOUTS[Ware.JADE] - PIRATE_PRICE
+        boarding = pirate_captain_boarding_bonus(state)
+        self.assertGreater(boarding, 0)  # sanity: this scenario has a real boarding chance
+        self.assertEqual(pirate_slot_ev_if_taken_now(state), plunder_ev + boarding)
+
+    def test_second_role_does_not_include_the_boarding_bonus(self):
+        # Only the captain gets the free-boarding privilege -- see
+        # pirate_captain_boarding_bonus's docstring.
+        state = _make_state()
+        state.movement_round_index = 0
+        punt = state.punts[0]
+        punt.ware = Ware.JADE
+        punt.ware_slots = Punt.new(punt.id, Ware.JADE).ware_slots
+        punt.status = PuntStatus.ON_ROUTE
+        punt.position = 6
+        state.pirate_boat.captain.occupant = "p0"  # only second is left to take
+
+        p_caught = position_outcomes(6, state.movement_rounds_total - state.movement_round_index)["caught_on_13"]
+        expected = p_caught * (PLUNDER_PAYOUTS[Ware.JADE] // 2) - PIRATE_PRICE
+        self.assertEqual(pirate_slot_ev_if_taken_now(state), expected)
 
 
 class TestPirateCaptainBoardingBonus(unittest.TestCase):
