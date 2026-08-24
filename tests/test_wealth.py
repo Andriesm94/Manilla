@@ -169,7 +169,7 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         self.assertEqual(expected_accomplice_return(state, "p0"), expected)
         self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
-    def test_last_two_turns_of_the_final_round_use_actual_occupancy(self):
+    def test_last_turn_of_the_final_round_uses_actual_occupancy(self):
         state = self._rigged_state()
         state.movement_round_index = 2  # about to trigger the third dice throw -- 1 round left
         state.current_turn_player_id = "p2"  # last of 3 players in this round's rotation
@@ -177,23 +177,27 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1, p_safe_if_caught=0)
         self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
-    def test_early_in_the_final_round_still_projects_full_occupancy(self):
+    def test_first_turn_of_the_final_round_also_uses_actual_occupancy(self):
+        # Per the user: the "will fill up" assumption is dropped for the
+        # *entire* final accomplice round, not just its last couple of
+        # turns -- even the harbor master's own first turn of that round
+        # (plenty of turns still to come) values p1's slot as-is.
         state = self._rigged_state()
         state.movement_round_index = 2
         state.current_turn_player_id = "p0"  # harbor master, first to act -- 3 turns still remain
-        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=3, p_safe_if_caught=0)
-        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
-
-    def test_exactly_two_turns_remaining_is_the_boundary(self):
-        state = self._rigged_state()
-        state.movement_round_index = 2
-        state.current_turn_player_id = "p1"  # 2nd of 3 -- exactly 2 turns remain, including this one
         expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1, p_safe_if_caught=0)
         self.assertEqual(expected_accomplice_return(state, "p1"), expected)
 
-    def test_pirate_valuation_is_unaffected_by_the_last_two_turns_rule(self):
-        # The last-two-turns exception is a ware-punt-only concept (see
-        # project_final_occupancy) -- pirates don't have a growth
+    def test_middle_turn_of_the_final_round_also_uses_actual_occupancy(self):
+        state = self._rigged_state()
+        state.movement_round_index = 2
+        state.current_turn_player_id = "p1"  # 2nd of 3
+        expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1, p_safe_if_caught=0)
+        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
+
+    def test_pirate_valuation_is_unaffected_by_the_final_round_rule(self):
+        # The final-accomplice-round exception is a ware-punt-only concept
+        # (see project_final_occupancy) -- pirates don't have a growth
         # projection to fall back from in the first place.
         state = self._rigged_state()
         state.movement_round_index = 2
@@ -231,13 +235,17 @@ class TestProjectFinalOccupancy(unittest.TestCase):
         state.movement_round_index = 0
         self.assertEqual(project_final_occupancy(state, current_occupied=1, max_slots=4), 4)
 
-    def test_defaults_to_full_capacity_early_in_the_final_round(self):
+    def test_uses_actual_occupancy_from_the_very_start_of_the_final_round(self):
+        # Per the user: the "will fill up" assumption is dropped for the
+        # *entire* final accomplice round, not just its last couple of
+        # turns -- even the harbor master's own first turn of that round
+        # (plenty of turns still to come) should use actual occupancy.
         state = _make_state()
         state.movement_round_index = 2
-        state.current_turn_player_id = "p0"  # harbor master, 3 turns remain
-        self.assertEqual(project_final_occupancy(state, current_occupied=1, max_slots=4), 4)
+        state.current_turn_player_id = "p0"  # harbor master, first turn of the round
+        self.assertEqual(project_final_occupancy(state, current_occupied=1, max_slots=4), 1)
 
-    def test_uses_actual_occupancy_in_the_last_two_turns(self):
+    def test_uses_actual_occupancy_on_the_last_turn_too(self):
         state = _make_state()
         state.movement_round_index = 2
         state.current_turn_player_id = "p2"  # last turn

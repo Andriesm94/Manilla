@@ -22,9 +22,10 @@ An opponent's already-placed ware-punt accomplice is valued against its
 right now -- see `project_final_occupancy`: a slot splitting a cargo profit
 tends to fill up over the placement rounds since joining an occupied slot
 still beats leaving that share on the table, so this assumes full capacity
-by default and only falls back to the current count in the last two turns
-before the third (final) dice throw, when there's no realistic time left
-for another accomplice to join.
+by default and only falls back to the current count during the final
+accomplice-placement round -- the one immediately before the third (final)
+dice throw, when this voyage's placements are effectively decided and
+there's no realistic further time for another accomplice to join.
 
 This projection isn't specific to valuing *someone else's* slot -- the same
 logic applies when deciding whether to take a vacant slot yourself. A punt
@@ -165,28 +166,14 @@ def _rounds_remaining(state: GameState) -> int:
     return state.movement_rounds_total - state.movement_round_index
 
 
-def _turns_remaining_in_final_accomplice_round(state: GameState):
-    """How many accomplice-placement turns remain this round, counting the
-    about-to-act player's own turn -- but only meaningful, so only
-    returned, in the round immediately preceding the third (final)
-    movement roll: accomplice rounds and dice rolls interleave one-for-one
-    (`BoardSetupApp._advance_turn` rolls dice the moment a round's
-    placements finish), so that's the one round after which no further
-    placement opportunity exists at all before the voyage resolves. Each
-    round restarts the rotation at the harbor master
-    (`BoardSetupApp._finish_round_end_roll`), so position-in-rotation is
-    recoverable from `current_turn_player_id` alone. Returns None outside
-    that round or the accomplice-placement phase -- there's a whole extra
-    round (or more) still ahead, plenty of time for a slot to fill."""
-    if state.phase != Phase.ACCOMPLICE_ROUND or state.movement_round_index != 2 or not state.players:
-        return None
-    order = state.players
-    harbor_master = next((p for p in order if p.is_harbor_master), order[0])
-    current_player = state.player_by_id(state.current_turn_player_id) or harbor_master
-    if current_player not in order:
-        current_player = harbor_master
-    position = (order.index(current_player) - order.index(harbor_master)) % len(order)
-    return len(order) - position
+def _is_final_accomplice_round(state: GameState) -> bool:
+    """True during the accomplice-placement round that immediately
+    precedes the third (final) movement roll -- the one round after
+    which no further placement opportunity exists at all before the
+    voyage resolves (accomplice rounds and dice rolls interleave
+    one-for-one: `BoardSetupApp._advance_turn` rolls dice the moment a
+    round's placements finish)."""
+    return state.phase == Phase.ACCOMPLICE_ROUND and state.movement_round_index == 2
 
 
 def project_final_occupancy(state: GameState, current_occupied: int, max_slots: int) -> int:
@@ -194,15 +181,16 @@ def project_final_occupancy(state: GameState, current_occupied: int, max_slots: 
     voyage resolves. Defaults to full capacity -- a slot splitting a cargo
     profit tends to fill up over the placement rounds, since joining an
     already-occupied slot still beats leaving that share on the table --
-    except in the last two turns before the third (final) dice throw, where
-    so little placement time remains that whatever is occupied right now is
-    assumed to be final.
+    except during the final accomplice round (the one immediately before
+    the third/final dice roll): per the user, the "will fill up" assumption
+    is dropped for the *entire* round, not just its last couple of turns,
+    so whatever's occupied right now is taken as final from the moment
+    that round begins.
 
     Pirates don't use this -- see the module docstring: their occupancy is
     valued as-is, with no projection at all.
     """
-    turns_left = _turns_remaining_in_final_accomplice_round(state)
-    if turns_left is not None and turns_left <= 2:
+    if _is_final_accomplice_round(state):
         return current_occupied
     return max_slots
 
@@ -485,10 +473,10 @@ def apply_ware_slot_placement(punt_id: int, player_id: str) -> Callable[[GameSta
     correct, not a gap: `project_final_occupancy` already valued their
     slot assuming the punt fills up regardless (see the module docstring),
     so taking another slot doesn't change what they were already assumed
-    to get. It only shows up as a real cost to them in the last two turns
-    before the third dice throw, where `project_final_occupancy` switches
-    to actual occupancy -- by then there's no more room for "it would have
-    filled anyway" to still be true, so an actual join is a real dilution.
+    to get. It only shows up as a real cost to them during the final
+    accomplice round, where `project_final_occupancy` switches to actual
+    occupancy -- by then there's no more room for "it would have filled
+    anyway" to still be true, so an actual join is a real dilution.
     """
 
     def _apply(state: GameState) -> None:
