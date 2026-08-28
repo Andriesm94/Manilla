@@ -819,58 +819,32 @@ class BoardSetupApp(tk.Frame):
         summary = ", ".join(f"{w.value} {r}" for w, r in rolls.items()) or "no loaded punts"
         message = f"Dice rolled: {summary}."
         board_after = self.state_obj.movement_round_index == 2
+        round3_done = self.state_obj.movement_round_index >= 3
 
-        if self.state_obj.movement_round_index >= 3:
-            # Voyage's third movement round is done -- resolve every punt
-            # still at sea: exactly on 13 with pirates present is plundered;
-            # exactly on 13 with no pirates still reaches port; anything
-            # short of 13 is shipwrecked to the shipyard.
-            plundered: List[Tuple[str, int]] = []
+        plundered_punts: List[Punt] = []
+        if round3_done:
+            # Voyage's third movement round is done -- resolve where every
+            # punt still at sea ends up: exactly on 13 with pirates present
+            # is plundered (the captain, or the lone second pirate, decides
+            # port vs. shipyard for it); exactly on 13 with no pirates still
+            # reaches port; anything short of 13 is shipwrecked. Nobody gets
+            # paid and ware values don't rise yet -- that's all deferred
+            # together, explicitly, to _distribute_profits.
             for punt in self.state_obj.punts:
                 if punt.ware is None or punt.status != PuntStatus.ON_ROUTE:
                     continue
                 if punt.position == SEA_ROUTE_LENGTH:
                     pb = self.state_obj.pirate_boat
                     if pb.captain.occupant or pb.second.occupant:
-                        plundered += self._resolve_plunder(punt)
+                        self._resolve_plunder_destination(punt)
+                        plundered_punts.append(punt)
                     else:
                         key = self._first_available_dock_key(PuntStatus.IN_PORT, exclude_punt=punt)
                         self._dock_punt(punt, PuntStatus.IN_PORT, key)
                 else:
                     key = self._first_available_dock_key(PuntStatus.IN_SHIPYARD, exclude_punt=punt)
                     self._dock_punt(punt, PuntStatus.IN_SHIPYARD, key)
-
-            # Pirate plunder (paid the instant a punt is caught, above) and
-            # the insurance occupant's upfront payment (paid at placement,
-            # tracked in _voyage_bonus_payouts) both happen outside this
-            # function's own round-end payouts -- fold them in too, so the
-            # one notification players see reflects every cash movement
-            # this voyage, not just what's computed right here.
-            paid = (
-                self._pay_port_shipyard_rewards()
-                + self._pay_ware_profits()
-                + self._pay_insurance_cost()
-                + plundered
-                + self._voyage_bonus_payouts
-            )
-            self._voyage_bonus_payouts = []
-            risen = self._raise_ware_values_for_arrivals()
-            self.state_obj.phase = Phase.PROFIT_DISTRIBUTION
             message += "\n\nThird movement round complete -- all punts have landed."
-            if paid:
-                totals: dict = {}
-                for color, amount in paid:
-                    totals[color] = totals.get(color, 0) + amount
-                color_order = {p.color: i for i, p in enumerate(self.state_obj.players)}
-                lines = [
-                    f"{color}: {'+' if amt >= 0 else ''}{amt}"
-                    for color, amt in sorted(totals.items(), key=lambda kv: color_order.get(kv[0], 999))
-                ]
-                message += "\n\nVoyage profit summary:\n" + "\n".join(lines)
-            if risen:
-                message += "\n\nWare values rise:\n" + "\n".join(risen)
-            if self.state_obj.black_market.is_game_over():
-                message += "\n\nGAME OVER -- a ware's value has reached 30!"
 
         # A fully computer-controlled voyage shouldn't stall on a modal that
         # nobody's there to dismiss.
@@ -878,20 +852,121 @@ class BoardSetupApp(tk.Frame):
         if not all_bots:
             messagebox.showinfo("Punts move", message)
 
-        def finish() -> None:
-            if then:
+        def after_boarding() -> None:
+            if round3_done:
+                self._show_profit_distribution_gate(plundered_punts, then)
+            elif then:
                 then()
-            if self.state_obj.phase != Phase.PROFIT_DISTRIBUTION:
-                return
-            if self.state_obj.black_market.is_game_over():
-                self._show_game_over_dialog()
-            elif all_bots:
-                self.after(BOT_DELAY_MS, self.on_start_next_voyage)
 
         if board_after:
-            self._handle_pirate_boarding(finish)
+            self._show_punt_standings_after_round2(lambda: self._handle_pirate_boarding(after_boarding))
         else:
-            finish()
+            after_boarding()
+
+    def _show_punt_standings_after_round2(self, then: Callable[[], None]) -> None:
+        """Round 2's roll has just resolved -- show exactly where every
+        punt sits before the pirates get a chance to board (boarding is
+        free, but it's still worth seeing standings first)."""
+        all_bots = bool(self.state_obj.players) and all(p.is_bot for p in self.state_obj.players)
+        if not all_bots:
+            messagebox.showinfo(
+                "Punt standings after the second roll",
+                "Second movement round complete. Standings before the pirates may board:\n\n"
+                + "\n".join(self._punt_standings_lines()),
+            )
+        then()
+
+    def _final_punt_standings_lines(self, plundered_punts: List[Punt]) -> List[str]:
+        plundered_ids = {p.id for p in plundered_punts}
+        lines = []
+        for punt in self.state_obj.punts:
+            if punt.ware is None:
+                continue
+            label = punt.ware.value.title()
+            where = "port" if punt.status == PuntStatus.IN_PORT else "shipyard"
+            note = " (plundered by the pirates)" if punt.id in plundered_ids else ""
+            lines.append(f"{label}: {where}, slot {punt.dock_slot}{note}")
+        return lines
+
+    def _show_profit_distribution_gate(
+        self, plundered_punts: List[Punt], then: Optional[Callable[[], None]]
+    ) -> None:
+        """The third and final roll has fully resolved -- every punt is
+        docked (or shipwrecked) and any plunder destinations are decided,
+        but nobody has been paid and ware values haven't risen yet. All of
+        that happens together, only once this is explicitly continued."""
+        all_bots = bool(self.state_obj.players) and all(p.is_bot for p in self.state_obj.players)
+        if all_bots:
+            self._distribute_profits(plundered_punts, then)
+            return
+
+        dialog = tk.Toplevel(self.winfo_toplevel())
+        dialog.title("Voyage complete")
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+
+        lines = self._final_punt_standings_lines(plundered_punts)
+        ttk.Label(
+            dialog,
+            text="All punts have landed. Final standings:\n\n" + "\n".join(lines),
+            wraplength=320,
+            justify=tk.LEFT,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(padx=12, pady=(12, 8))
+
+        def resolve() -> None:
+            dialog.destroy()
+            self._distribute_profits(plundered_punts, then)
+
+        ttk.Button(dialog, text="Continue to Profit Distribution", command=resolve).pack(padx=12, pady=(8, 12))
+
+    def _distribute_profits(self, plundered_punts: List[Punt], then: Optional[Callable[[], None]]) -> None:
+        """Pays out every accomplice's profit for the voyage together --
+        loaded-ware, port/shipyard, insurance repairs, and pirate plunder
+        shares -- then rises ware values and enters Profit Distribution.
+        The insurance office's upfront joining bonus was already paid at
+        placement time (tracked in _voyage_bonus_payouts); it's folded
+        into this summary purely for display."""
+        paid = (
+            self._pay_port_shipyard_rewards()
+            + self._pay_ware_profits()
+            + self._pay_insurance_cost()
+            + self._pay_pirate_plunder(plundered_punts)
+            + self._voyage_bonus_payouts
+        )
+        self._voyage_bonus_payouts = []
+        risen = self._raise_ware_values_for_arrivals()
+        self.state_obj.phase = Phase.PROFIT_DISTRIBUTION
+
+        message = "Profits distributed."
+        if paid:
+            totals: dict = {}
+            for color, amount in paid:
+                totals[color] = totals.get(color, 0) + amount
+            color_order = {p.color: i for i, p in enumerate(self.state_obj.players)}
+            lines = [
+                f"{color}: {'+' if amt >= 0 else ''}{amt}"
+                for color, amt in sorted(totals.items(), key=lambda kv: color_order.get(kv[0], 999))
+            ]
+            message += "\n\nVoyage profit summary:\n" + "\n".join(lines)
+        if risen:
+            message += "\n\nWare values rise:\n" + "\n".join(risen)
+        game_over = self.state_obj.black_market.is_game_over()
+        if game_over:
+            message += "\n\nGAME OVER -- a ware's value has reached 30!"
+
+        all_bots = bool(self.state_obj.players) and all(p.is_bot for p in self.state_obj.players)
+        if not all_bots:
+            messagebox.showinfo("Profit distribution", message)
+        self.refresh()
+
+        if then:
+            then()
+        if game_over:
+            self._show_game_over_dialog()
+        elif all_bots:
+            self.after(BOT_DELAY_MS, self.on_start_next_voyage)
 
     def _pay_port_shipyard_rewards(self) -> List[Tuple[str, int]]:
         """Port/shipyard accomplices are paid once, at the end of the third
@@ -963,18 +1038,33 @@ class BoardSetupApp(tk.Frame):
                 risen.append(f"{punt.ware.value.title()}: {before} -> {after}")
         return risen
 
-    def _resolve_plunder(self, punt: Punt) -> List[Tuple[str, int]]:
-        payout = PLUNDER_PAYOUTS.get(punt.ware, 0)
+    def _pay_pirate_plunder(self, plundered_punts: List[Punt]) -> List[Tuple[str, int]]:
+        """Pirates are paid their share of each plundered punt's cargo
+        value together with every other accomplice, during profit
+        distribution -- not at the moment the punt was actually caught."""
+        paid: List[Tuple[str, int]] = []
         pb = self.state_obj.pirate_boat
         pirate_ids = [pid for pid in (pb.captain.occupant, pb.second.occupant) if pid]
-        paid: List[Tuple[str, int]] = []
-        if pirate_ids:
+        if not pirate_ids:
+            return paid
+        for punt in plundered_punts:
+            payout = PLUNDER_PAYOUTS.get(punt.ware, 0)
             share = payout // len(pirate_ids)
             for pid in pirate_ids:
                 player = self.state_obj.player_by_id(pid)
                 if player is not None:
                     player.cash += share
                     paid.append((player.color, share))
+        return paid
+
+    def _resolve_plunder_destination(self, punt: Punt) -> None:
+        """Decides where a plundered punt docks -- the captain (or the
+        second pirate alone) chooses port vs. shipyard for each plundered
+        punt separately. Accomplices are returned immediately (no money
+        involved); the pirates' cut of the cargo value is paid later,
+        during profit distribution, along with everyone else's payouts."""
+        payout = PLUNDER_PAYOUTS.get(punt.ware, 0)
+        pb = self.state_obj.pirate_boat
 
         for slot in punt.ware_slots:
             slot.occupant = None  # accomplices are returned, empty-handed
@@ -991,13 +1081,13 @@ class BoardSetupApp(tk.Frame):
             send_to_port = messagebox.askyesno(
                 "Pirates plunder!",
                 f"Punt {punt.id} ({punt.ware.value}) was caught on space 13!\n"
-                f"{decider_name} splits {payout} PESOS with the crew.\n\n"
+                f"{decider_name} decides where it goes -- the crew's {payout} PESOS "
+                f"is paid during profit distribution.\n\n"
                 f"Send this punt to the PORT? (No sends it to the shipyard instead.)",
             )
         status = PuntStatus.IN_PORT if send_to_port else PuntStatus.IN_SHIPYARD
         key = self._first_available_dock_key(status, exclude_punt=punt)
         self._dock_punt(punt, status, key)
-        return paid
 
     # ------------------------------------------------------------------
     # Pirate boarding (right after the second movement round)

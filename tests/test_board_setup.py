@@ -19,7 +19,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manilla.ui.board_setup import BoardSetupApp
-from manilla.engine.models import Punt, PuntStatus, SEA_ROUTE_LENGTH, Ware
+from manilla.engine.models import Phase, Punt, PuntStatus, SEA_ROUTE_LENGTH, Ware
 
 
 class TkTestCase(unittest.TestCase):
@@ -184,6 +184,9 @@ class TestPlunderOnlyAfterRound3Roll(TkTestCase):
         self.assertEqual([p.cash for p in self.state.players], cash_before, "no plunder payout -- it wasn't caught")
 
     def test_landing_exactly_on_13_after_round3_roll_does_plunder(self):
+        """Docking is decided the instant the roll resolves, but nobody --
+        not even the pirates -- gets paid until Profit Distribution is
+        explicitly continued into."""
         punt = self.make_punt(0, Ware.JADE, 12)
         punt.ware_slots[0].occupant = self.state.players[2].id
         self.set_pirates(captain=True, second=True)
@@ -195,9 +198,47 @@ class TestPlunderOnlyAfterRound3Roll(TkTestCase):
         ), mock.patch("manilla.ui.board_setup.random.randint", return_value=1):
             self.app._roll_dice_and_move()
 
-        self.assertGreater(self.state.players[0].cash, cash_before, "captain shares the plunder payout")
         self.assertIsNone(punt.ware_slots[0].occupant, "plundered punt's accomplices are returned empty-handed")
         self.assertEqual(punt.status, PuntStatus.IN_PORT)
+        self.assertEqual(self.state.players[0].cash, cash_before, "pirates aren't paid yet")
+
+        gate = self.find_toplevels("Voyage complete")
+        self.assertEqual(len(gate), 1, "an explicit continue gate should be showing")
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo"):
+            self.button_in(gate[0], "Continue to Profit Distribution").invoke()
+
+        self.assertGreater(self.state.players[0].cash, cash_before, "captain shares the plunder payout, now paid")
+
+    def test_landing_exactly_on_13_after_round3_with_no_pirates_reaches_port(self):
+        """Rulebook: 'When a punt stands on space 13 after the third
+        movement round and there are no pirates on the pirate boat, it is
+        placed on the next vacant port space.' No pirates aboard means no
+        plunder decision and no shipwreck -- straight to port."""
+        punt = self.make_punt(0, Ware.NUTMEG, 12)
+        self.set_pirates(captain=False, second=False)
+        self.state.movement_round_index = 2
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo"), mock.patch(
+            "manilla.ui.board_setup.messagebox.askyesno"
+        ) as askyesno, mock.patch("manilla.ui.board_setup.random.randint", return_value=1):
+            self.app._roll_dice_and_move()
+
+        askyesno.assert_not_called()
+        self.assertEqual(punt.status, PuntStatus.IN_PORT)
+
+    def test_short_of_13_after_round3_is_shipwrecked_even_with_pirates_aboard(self):
+        """Falling short of 13 is a shipwreck regardless of the pirates --
+        they only ever act on a punt that's exactly on space 13."""
+        punt = self.make_punt(0, Ware.NUTMEG, 5)
+        self.set_pirates(captain=True, second=True)
+        self.state.movement_round_index = 2
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo"), mock.patch(
+            "manilla.ui.board_setup.random.randint", return_value=1
+        ):
+            self.app._roll_dice_and_move()
+
+        self.assertEqual(punt.status, PuntStatus.IN_SHIPYARD)
 
 
 class TestPlunderDestinationDecision(TkTestCase):
@@ -210,7 +251,7 @@ class TestPlunderDestinationDecision(TkTestCase):
         self.set_pirates(captain=True, second=False)
 
         with mock.patch("manilla.ui.board_setup.messagebox.askyesno", return_value=True) as askyesno:
-            self.app._resolve_plunder(punt)
+            self.app._resolve_plunder_destination(punt)
 
         askyesno.assert_called_once()
         self.assertIn(self.state.players[0].name, askyesno.call_args[0][1], "dialog names the captain")
@@ -221,7 +262,7 @@ class TestPlunderDestinationDecision(TkTestCase):
         self.set_pirates(captain=True, second=False)
 
         with mock.patch("manilla.ui.board_setup.messagebox.askyesno", return_value=False):
-            self.app._resolve_plunder(punt)
+            self.app._resolve_plunder_destination(punt)
 
         self.assertEqual(punt.status, PuntStatus.IN_SHIPYARD)
 
@@ -233,7 +274,7 @@ class TestPlunderDestinationDecision(TkTestCase):
         with mock.patch("manilla.ui.board_setup.messagebox.askyesno") as askyesno, mock.patch(
             "manilla.ui.board_setup.random.random", return_value=0.0
         ):
-            self.app._resolve_plunder(punt)
+            self.app._resolve_plunder_destination(punt)
 
         askyesno.assert_not_called()
         self.assertEqual(punt.status, PuntStatus.IN_PORT)
@@ -245,7 +286,7 @@ class TestPlunderDestinationDecision(TkTestCase):
         self.set_pirates(captain=False, second=True)
 
         with mock.patch("manilla.ui.board_setup.messagebox.askyesno", return_value=True) as askyesno:
-            self.app._resolve_plunder(punt)
+            self.app._resolve_plunder_destination(punt)
 
         askyesno.assert_called_once()
         self.assertIn(self.state.players[1].name, askyesno.call_args[0][1], "dialog names the second pirate")
@@ -262,7 +303,7 @@ class TestPlunderDestinationDecision(TkTestCase):
         with mock.patch("manilla.ui.board_setup.messagebox.askyesno") as askyesno, mock.patch(
             "manilla.ui.board_setup.random.random", return_value=0.99
         ):
-            self.app._resolve_plunder(punt)
+            self.app._resolve_plunder_destination(punt)
 
         askyesno.assert_not_called()
         self.assertEqual(punt.status, PuntStatus.IN_SHIPYARD)
@@ -273,8 +314,8 @@ class TestPlunderDestinationDecision(TkTestCase):
         self.set_pirates(captain=True, second=False)
 
         with mock.patch("manilla.ui.board_setup.messagebox.askyesno", side_effect=[True, False]):
-            self.app._resolve_plunder(a)
-            self.app._resolve_plunder(b)
+            self.app._resolve_plunder_destination(a)
+            self.app._resolve_plunder_destination(b)
 
         self.assertEqual(a.status, PuntStatus.IN_PORT)
         self.assertEqual(b.status, PuntStatus.IN_SHIPYARD)
@@ -549,6 +590,120 @@ class TestPuntStandingsNotification(TkTestCase):
             self.app._show_punt_standings_before_final_roll()
 
         showinfo.assert_not_called()
+
+
+class TestPuntStandingsAfterRound2(TkTestCase):
+    """An explicit notification shows where every punt sits right after
+    the second movement round's roll, before the pirates get a chance to
+    board (boarding is free either way, but standings should be visible
+    first)."""
+
+    def test_standings_shown_before_the_boarding_dialog(self):
+        self.make_punt(0, Ware.NUTMEG, 12)
+        self.set_pirates(captain=True, second=False)
+        self.state.movement_round_index = 1  # this roll becomes round 2
+
+        calls = []
+        with mock.patch(
+            "manilla.ui.board_setup.messagebox.showinfo", side_effect=lambda title, body: calls.append(title)
+        ), mock.patch("manilla.ui.board_setup.random.randint", return_value=1):
+            self.app._roll_dice_and_move()
+        self.root.update()
+
+        self.assertEqual(calls, ["Punts move", "Punt standings after the second roll"])
+        self.assertEqual(len(self.find_toplevels("Pirate captain")), 1, "boarding dialog opens after the standings")
+
+    def test_standings_message_reflects_current_positions(self):
+        self.make_punt(0, Ware.NUTMEG, 6)
+        self.state.movement_round_index = 1
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo, mock.patch(
+            "manilla.ui.board_setup.random.randint", return_value=2
+        ):
+            self.app._roll_dice_and_move()
+
+        title, body = next(
+            c.args for c in showinfo.call_args_list if c.args[0] == "Punt standings after the second roll"
+        )
+        self.assertIn("Nutmeg: space 8 of 13", body)
+
+    def test_no_blocking_dialog_in_an_all_bot_game(self):
+        for p in self.state.players:
+            p.is_bot = True
+        self.state.movement_round_index = 1
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo, mock.patch(
+            "manilla.ui.board_setup.random.randint", return_value=1
+        ):
+            self.app._roll_dice_and_move()
+
+        showinfo.assert_not_called()
+
+
+class TestProfitDistributionGate(TkTestCase):
+    """The third and final roll docks every punt (and decides plunder
+    destinations) immediately, but nobody is paid and ware values don't
+    rise until "Continue to Profit Distribution" is explicitly clicked."""
+
+    def test_payouts_and_phase_change_wait_for_the_continue_click(self):
+        punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
+        punt.ware_slots[0].occupant = self.state.players[0].id
+        for other in self.state.punts[1:]:
+            other.ware = None
+        self.state.movement_round_index = 2
+        cash_before = self.state.players[0].cash
+        market_before = dict(self.state.black_market.values)
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo"), mock.patch(
+            "manilla.ui.board_setup.random.randint", return_value=1
+        ):
+            self.app._roll_dice_and_move()
+
+        self.assertEqual(self.state.players[0].cash, cash_before, "ware profit not paid yet")
+        self.assertEqual(dict(self.state.black_market.values), market_before, "value hasn't risen yet")
+        self.assertNotEqual(self.state.phase, Phase.PROFIT_DISTRIBUTION)
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo"):
+            self.button_in(self.find_toplevels("Voyage complete")[0], "Continue to Profit Distribution").invoke()
+
+        self.assertGreater(self.state.players[0].cash, cash_before, "ware profit paid after continuing")
+        self.assertNotEqual(dict(self.state.black_market.values), market_before, "value rises after continuing")
+        self.assertEqual(self.state.phase, Phase.PROFIT_DISTRIBUTION)
+
+    def test_final_standings_dialog_lists_plunder_notes(self):
+        self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH - 1)
+        self.set_pirates(captain=True, second=False)
+        self.state.movement_round_index = 2
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo"), mock.patch(
+            "manilla.ui.board_setup.messagebox.askyesno", return_value=True
+        ), mock.patch("manilla.ui.board_setup.random.randint", return_value=1):
+            self.app._roll_dice_and_move()
+
+        gate = self.find_toplevels("Voyage complete")
+        text = next(w.cget("text") for w in self.all_widgets(gate[0]) if w.winfo_class() == "TLabel")
+        self.assertIn("Nutmeg", text)
+        self.assertIn("plundered by the pirates", text)
+
+    def test_all_bot_game_auto_distributes_without_a_dialog(self):
+        for p in self.state.players:
+            p.is_bot = True
+        punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
+        punt.ware_slots[0].occupant = self.state.players[0].id
+        for other in self.state.punts[1:]:
+            other.ware = None
+        self.state.movement_round_index = 2
+        cash_before = self.state.players[0].cash
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo, mock.patch(
+            "manilla.ui.board_setup.random.randint", return_value=1
+        ):
+            self.app._roll_dice_and_move()
+
+        showinfo.assert_not_called()
+        self.assertEqual(self.find_toplevels("Voyage complete"), [], "bots never see the gate dialog")
+        self.assertGreater(self.state.players[0].cash, cash_before, "bots auto-continue straight through")
+        self.assertEqual(self.state.phase, Phase.PROFIT_DISTRIBUTION)
 
 
 if __name__ == "__main__":

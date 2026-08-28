@@ -2,10 +2,17 @@
 occupant's upfront payment were real (players did receive the cash) but
 never appeared in the round-end "Voyage profit summary" notification --
 only port/shipyard rewards, ware-cargo splits, and insurance repair costs
-were included. Fixed by having `_resolve_plunder` report what it paid out
-and folding it, plus a new `_voyage_bonus_payouts` tracker for the
+were included. Fixed by having `_pay_pirate_plunder` report what it paid
+out and folding it, plus a new `_voyage_bonus_payouts` tracker for the
 insurance payment (paid at placement time, well before round-end), into
 the same summary.
+
+All of this -- pirate plunder, ware/port/shipyard profits, insurance
+repairs, and the ware-value rise -- is computed together by
+`_distribute_profits`, only once "Continue to Profit Distribution" is
+explicitly clicked (see the "Voyage complete" gate in
+`_show_profit_distribution_gate`), not automatically the instant the
+third roll resolves.
 """
 
 import os
@@ -40,24 +47,43 @@ class ProfitSummaryTestCase(unittest.TestCase):
         punt.position = position
         return punt
 
+    def find_toplevels(self, title_substr):
+        return [
+            t for t in self.root.winfo_children() if isinstance(t, tk.Toplevel) and title_substr in t.title()
+        ]
 
-class TestResolvePlunderReportsItsPayouts(ProfitSummaryTestCase):
+    def all_widgets(self, widget):
+        acc = [widget]
+        for child in widget.winfo_children():
+            acc.extend(self.all_widgets(child))
+        return acc
+
+    def button_in(self, widget, text_contains):
+        return next(
+            w for w in self.all_widgets(widget) if w.winfo_class() == "TButton" and text_contains in w.cget("text")
+        )
+
+    def click_continue_to_profit_distribution(self):
+        gate = self.find_toplevels("Voyage complete")
+        self.assertEqual(len(gate), 1, "expected the profit-distribution gate to be showing")
+        self.button_in(gate[0], "Continue to Profit Distribution").invoke()
+
+
+class TestPayPiratePlunderReportsItsPayouts(ProfitSummaryTestCase):
     def test_returns_the_color_and_share_paid_to_each_pirate(self):
         punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
         players = self.state.players
         self.state.pirate_boat.captain.occupant = players[0].id
         self.state.pirate_boat.second.occupant = players[1].id
 
-        with mock.patch("manilla.ui.board_setup.messagebox.askyesno", return_value=True):
-            paid = self.app._resolve_plunder(punt)
+        paid = self.app._pay_pirate_plunder([punt])
 
         expected_share = 24 // 2  # NUTMEG plunder payout split two ways
         self.assertEqual(set(paid), {(players[0].color, expected_share), (players[1].color, expected_share)})
 
     def test_empty_when_no_pirates_are_aboard(self):
         punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
-        with mock.patch("manilla.ui.board_setup.messagebox.askyesno", return_value=True):
-            paid = self.app._resolve_plunder(punt)
+        paid = self.app._pay_pirate_plunder([punt])
         self.assertEqual(paid, [])
 
 
@@ -108,9 +134,10 @@ class TestRoundEndSummaryIncludesEverything(ProfitSummaryTestCase):
             "manilla.ui.board_setup.random.random", return_value=0.0
         ), mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
             self.app._roll_dice_and_move()
+            showinfo.assert_called_once()  # just the roll summary so far -- nobody's been paid yet
+            self.click_continue_to_profit_distribution()
 
-        showinfo.assert_called_once()
-        message = showinfo.call_args[0][1]
+        message = showinfo.call_args_list[-1].args[1]
         self.assertIn("Voyage profit summary", message)
         self.assertIn(pirate_player.color, message)
         self.assertIn(insurance_player.color, message)
@@ -128,6 +155,10 @@ class TestRoundEndSummaryIncludesEverything(ProfitSummaryTestCase):
             "manilla.ui.board_setup.messagebox.showinfo"
         ):
             self.app._roll_dice_and_move()
+            self.assertEqual(
+                self.app._voyage_bonus_payouts, [(players[0].color, 10)], "still pending -- gate not clicked yet"
+            )
+            self.click_continue_to_profit_distribution()
 
         self.assertEqual(self.app._voyage_bonus_payouts, [])
 
