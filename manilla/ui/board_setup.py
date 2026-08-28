@@ -44,7 +44,7 @@ from manilla.engine.harbor_master import (
     harbor_master_bid_context,
 )
 from manilla.engine.policy import choose_accomplice_action
-from manilla.engine.wealth import pirate_slot_ev_if_taken_now
+from manilla.engine.wealth import best_pilot_move_spec, best_pirate_boarding_move, pirate_slot_ev_if_taken_now
 
 WARE_COLORS = {
     Ware.NUTMEG: "#8B5A2B",
@@ -118,14 +118,13 @@ class BoardSetupApp(tk.Frame):
         # the start of every voyage's auction (_show_auction_dialog), not
         # saved (it's a policy-internal detail, not real game state).
         self._first_mover_costs: dict = {}
-        # Cash movements this voyage that don't happen at round-end
-        # profit distribution -- currently just the insurance occupant's
-        # upfront payment, paid the moment they place (_place_or_remove_
-        # insurance), not when everything else gets paid out. Folded into
-        # the round-end "Voyage profit summary" so it isn't silently
-        # missing from the one notification players actually see; reset
-        # at the start of each voyage (_apply_load_and_place).
-        self._voyage_bonus_payouts: List[Tuple[str, int]] = []
+        # Each player's cash at the moment this voyage's accomplice-
+        # placement phase began (_apply_load_and_place) -- the baseline
+        # the round-end "Voyage profit summary" diffs against, so it
+        # reflects every cash movement all voyage (placement costs,
+        # insurance's upfront payment, profit distribution, ...) rather
+        # than an itemized list that has to remember to include each one.
+        self._cash_at_round_start: dict = {}
 
         self._build_toolbar()
         self._build_body()
@@ -789,14 +788,12 @@ class BoardSetupApp(tk.Frame):
                 return
             ins.occupant = player.id
             player.cash += ins.payment
-            self._voyage_bonus_payouts.append((player.color, ins.payment))
             self._advance_turn()
         else:
             player = self.state_obj.player_by_id(ins.occupant)
             ins.occupant = None
             if player is not None:
                 player.cash -= ins.payment
-                self._voyage_bonus_payouts.append((player.color, -ins.payment))
 
     def _roll_dice_and_move(self, then: Optional[Callable[[], None]] = None) -> None:
         rolls: dict = {}
@@ -925,30 +922,26 @@ class BoardSetupApp(tk.Frame):
         """Pays out every accomplice's profit for the voyage together --
         loaded-ware, port/shipyard, insurance repairs, and pirate plunder
         shares -- then rises ware values and enters Profit Distribution.
-        The insurance office's upfront joining bonus was already paid at
-        placement time (tracked in _voyage_bonus_payouts); it's folded
-        into this summary purely for display."""
-        paid = (
-            self._pay_port_shipyard_rewards()
-            + self._pay_ware_profits()
-            + self._pay_insurance_cost()
-            + self._pay_pirate_plunder(plundered_punts)
-            + self._voyage_bonus_payouts
-        )
-        self._voyage_bonus_payouts = []
+        The summary compares each player's cash now against their cash at
+        the start of this voyage's accomplice-placement phase
+        (_cash_at_round_start, set in _apply_load_and_place), so it
+        reflects every cash movement all voyage -- placement costs, the
+        insurance bonus, every payout here -- not just what this function
+        itself pays out."""
+        cash_before = self._cash_at_round_start
+        self._pay_port_shipyard_rewards()
+        self._pay_ware_profits()
+        self._pay_insurance_cost()
+        self._pay_pirate_plunder(plundered_punts)
         risen = self._raise_ware_values_for_arrivals()
         self.state_obj.phase = Phase.PROFIT_DISTRIBUTION
 
         message = "Profits distributed."
-        if paid:
-            totals: dict = {}
-            for color, amount in paid:
-                totals[color] = totals.get(color, 0) + amount
-            color_order = {p.color: i for i, p in enumerate(self.state_obj.players)}
-            lines = [
-                f"{color}: {'+' if amt >= 0 else ''}{amt}"
-                for color, amt in sorted(totals.items(), key=lambda kv: color_order.get(kv[0], 999))
-            ]
+        if self.state_obj.players:
+            lines = []
+            for player in self.state_obj.players:
+                delta = player.cash - cash_before.get(player.id, player.cash)
+                lines.append(f"{player.color}: {'+' if delta >= 0 else ''}{delta}")
             message += "\n\nVoyage profit summary:\n" + "\n".join(lines)
         if risen:
             message += "\n\nWare values rise:\n" + "\n".join(risen)
@@ -1119,17 +1112,22 @@ class BoardSetupApp(tk.Frame):
 
         def after_captain() -> None:
             if pb.second.occupant:
-                self._show_boarding_dialog(pb.second, "Second pirate", candidates, maybe_promote_second)
+                self._show_boarding_dialog(pb.second, "second", "Second pirate", candidates, maybe_promote_second)
             else:
                 maybe_promote_second()
 
         if pb.captain.occupant:
-            self._show_boarding_dialog(pb.captain, "Pirate captain", candidates, after_captain)
+            self._show_boarding_dialog(pb.captain, "captain", "Pirate captain", candidates, after_captain)
         else:
             after_captain()
 
     def _show_boarding_dialog(
-        self, boat_slot: AccompliceSlot, role_label: str, candidates: List[Punt], then: Callable[[], None]
+        self,
+        boat_slot: AccompliceSlot,
+        boat_slot_name: str,
+        role_label: str,
+        candidates: List[Punt],
+        then: Callable[[], None],
     ) -> None:
         player = self.state_obj.player_by_id(boat_slot.occupant)
         boardable = [p for p in candidates if any(s.occupant is None for s in p.ware_slots)]
@@ -1138,9 +1136,15 @@ class BoardSetupApp(tk.Frame):
             return
 
         if player.is_bot:
-            # Random policy: board a random eligible punt about 60% of the
-            # time, otherwise skip.
-            self.after(BOT_DELAY_MS, lambda: self._bot_board_or_skip(player, boat_slot, boardable, then))
+            if player.policy == "rev":
+                self.after(
+                    BOT_DELAY_MS,
+                    lambda: self._rev_board_or_skip(player, boat_slot, boat_slot_name, boardable, then),
+                )
+            else:
+                # Random policy: board a random eligible punt about 60% of
+                # the time, otherwise skip.
+                self.after(BOT_DELAY_MS, lambda: self._bot_board_or_skip(player, boat_slot, boardable, then))
             return
 
         dialog = tk.Toplevel(self.winfo_toplevel())
@@ -1187,6 +1191,33 @@ class BoardSetupApp(tk.Frame):
             self.refresh()
         then()
 
+    def _rev_board_or_skip(
+        self,
+        player: Player,
+        boat_slot: AccompliceSlot,
+        boat_slot_name: str,
+        boardable: List[Punt],
+        then: Callable[[], None],
+    ) -> None:
+        """Per the user: compare the REV of boarding for free against the
+        REV of staying put, rather than the random policy's flat 60%
+        chance. `_show_boarding_dialog` already recomputes `boardable`
+        fresh for each pirate in turn (captain first, then second only if
+        still aboard), so a captain's own boarding -- which can fill the
+        very slot the second would have taken -- is already reflected by
+        the time the second gets to decide."""
+        beliefs = infer_beliefs(self.state_obj, player.id)
+        punt_id = best_pirate_boarding_move(
+            self.state_obj, beliefs, player.id, boat_slot_name, [p.id for p in boardable]
+        )
+        if punt_id is not None:
+            punt = next(p for p in boardable if p.id == punt_id)
+            ware_slot = next(s for s in punt.ware_slots if s.occupant is None)
+            ware_slot.occupant = player.id
+            boat_slot.occupant = None  # the pirate's piece physically left the boat
+            self.refresh()
+        then()
+
     # ------------------------------------------------------------------
     # Pilots (just before the third movement round)
     # ------------------------------------------------------------------
@@ -1225,7 +1256,7 @@ class BoardSetupApp(tk.Frame):
             return
 
         if player.is_bot:
-            self.after(BOT_DELAY_MS, lambda: self._bot_small_pilot_move(eligible, then))
+            self.after(BOT_DELAY_MS, lambda: self._bot_small_pilot_move(player, eligible, then))
             return
 
         dialog = tk.Toplevel(self.winfo_toplevel())
@@ -1262,7 +1293,16 @@ class BoardSetupApp(tk.Frame):
         ttk.Button(btn_row, text="Move backward (-1)", command=lambda: move(-1)).pack(side=tk.LEFT, padx=4)
         ttk.Button(btn_row, text="Skip", command=resolve).pack(side=tk.LEFT, padx=4)
 
-    def _bot_small_pilot_move(self, eligible: List[Punt], then: Callable[[], None]) -> None:
+    def _bot_small_pilot_move(self, player: Player, eligible: List[Punt], then: Callable[[], None]) -> None:
+        if player.policy == "rev":
+            beliefs = infer_beliefs(self.state_obj, player.id)
+            for punt_id, delta in best_pilot_move_spec(self.state_obj, beliefs, player.id, "small"):
+                punt = next(p for p in self.state_obj.punts if p.id == punt_id)
+                self._apply_pilot_move(punt, delta)
+            self.refresh()
+            then()
+            return
+
         if random.random() < 0.5:
             punt = random.choice(eligible)
             self._apply_pilot_move(punt, random.choice([1, -1]))
@@ -1277,7 +1317,7 @@ class BoardSetupApp(tk.Frame):
             return
 
         if player.is_bot:
-            self.after(BOT_DELAY_MS, lambda: self._bot_large_pilot_move(eligible, then))
+            self.after(BOT_DELAY_MS, lambda: self._bot_large_pilot_move(player, eligible, then))
             return
 
         dialog = tk.Toplevel(self.winfo_toplevel())
@@ -1383,7 +1423,16 @@ class BoardSetupApp(tk.Frame):
 
         update_mode()
 
-    def _bot_large_pilot_move(self, eligible: List[Punt], then: Callable[[], None]) -> None:
+    def _bot_large_pilot_move(self, player: Player, eligible: List[Punt], then: Callable[[], None]) -> None:
+        if player.policy == "rev":
+            beliefs = infer_beliefs(self.state_obj, player.id)
+            for punt_id, delta in best_pilot_move_spec(self.state_obj, beliefs, player.id, "large"):
+                punt = next(p for p in self.state_obj.punts if p.id == punt_id)
+                self._apply_pilot_move(punt, delta)
+            self.refresh()
+            then()
+            return
+
         roll = random.random()
         if roll < 0.35:
             pass  # skip
@@ -2101,7 +2150,7 @@ class BoardSetupApp(tk.Frame):
         self.state_obj.phase = Phase.ACCOMPLICE_ROUND
         self.state_obj.current_turn_player_id = harbor_master.id
         self._round_placements = 0
-        self._voyage_bonus_payouts = []
+        self._cash_at_round_start = {p.id: p.cash for p in self.state_obj.players}
         self.refresh()
         self._maybe_take_bot_turn()
 

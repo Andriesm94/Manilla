@@ -591,6 +591,72 @@ def apply_pirate_placement(role: str, player_id: str) -> Callable[[GameState], N
     return _apply
 
 
+def apply_pirate_boarding(boat_slot_name: str, punt_id: int, player_id: str) -> Callable[[GameState], None]:
+    """Build an `action_impact` mutator for a pirate physically boarding
+    `punt_id`'s first vacant ware slot -- matching `BoardSetupApp._show_
+    boarding_dialog`'s `board()`: the *first* vacant slot in array order,
+    not the cheapest, since this is a free physical seizure (no price to
+    weigh a "which slot" choice against), not a paid placement. Vacates
+    the boarder's own pirate-boat slot (`boat_slot_name`: 'captain' or
+    'second') in the same move, since boarding is that piece physically
+    leaving the boat. No-ops if the punt doesn't exist or has no vacant
+    slot."""
+    if boat_slot_name not in ("captain", "second"):
+        raise ValueError(f"boat_slot_name must be 'captain' or 'second', got {boat_slot_name!r}")
+
+    def _apply(state: GameState) -> None:
+        punt = next((p for p in state.punts if p.id == punt_id), None)
+        if punt is None:
+            return
+        slot = next((s for s in punt.ware_slots if s.occupant is None), None)
+        if slot is None:
+            return
+        slot.occupant = player_id
+        boat_slot = state.pirate_boat.captain if boat_slot_name == "captain" else state.pirate_boat.second
+        boat_slot.occupant = None
+
+    return _apply
+
+
+def best_pirate_boarding_move(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    boat_slot_name: str,
+    boardable_punt_ids: List[int],
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> Optional[int]:
+    """Whether -- and which punt -- `my_id` (currently seated in
+    `boat_slot_name`, 'captain' or 'second') should board for free right
+    now, among `boardable_punt_ids`. Per the user: REV-scored, staying
+    put (a no-op) against boarding each candidate punt
+    (`apply_pirate_boarding`), same `total_rev_after`-maximizing
+    comparison every other REV-based decision in this module uses.
+    Returns the punt id to board, or `None` to stay. Ties keep staying
+    (checked first), matching `best_pilot_move`'s "indifference defaults
+    toward doing less" convention.
+
+    Per the user, the captain decides first; the second pirate (if still
+    aboard) gets the same kind of decision afterward, but only among
+    whatever's *still* boardable by then -- this function doesn't handle
+    that sequencing itself, since it only ever answers for one pirate at
+    a time. A caller resolving the captain first and passing the second
+    pirate a freshly-recomputed `boardable_punt_ids` (vacancies the
+    captain's own boarding may have just filled) gets that ordering for
+    free.
+    """
+    stay_score = action_impact(state, beliefs, my_id, lambda s: None, p_safe_if_caught).total_rev_after
+    best_punt_id: Optional[int] = None
+    best_score = stay_score
+    for punt_id in boardable_punt_ids:
+        mutator = apply_pirate_boarding(boat_slot_name, punt_id, my_id)
+        score = action_impact(state, beliefs, my_id, mutator, p_safe_if_caught).total_rev_after
+        if score > best_score:
+            best_score = score
+            best_punt_id = punt_id
+    return best_punt_id
+
+
 def apply_pilot_move(punt_id: int, delta: int) -> Callable[[GameState], None]:
     """Build an `action_impact` mutator applying a pilot's positional nudge
     to punt `punt_id` by `delta` spaces, matching
@@ -777,6 +843,64 @@ def best_pilot_move(
         if impact.total_rev_after > best_impact.total_rev_after:
             best_action, best_impact = action, impact
     return best_action, best_impact
+
+
+def pilot_move_specs(state: GameState, pilot_size: str) -> List[List[Tuple[int, int]]]:
+    """`pilot_move_candidates`'s own candidates, exposed as `[(punt_id,
+    delta), ...]` specs instead of opaque mutators -- one entry per
+    candidate, in the same order, so a caller can report back *which*
+    move `best_pilot_move` chose (empty for skip, one pair for a single-
+    punt move, two pairs for a two-punt large-pilot move) and replay it
+    through its own dock-slot-aware pilot-move method
+    (`BoardSetupApp._apply_pilot_move` /
+    `manilla.engine.selfplay._apply_pilot_move`) rather than
+    `apply_pilot_move`'s wealth-estimation-only mutator, which
+    deliberately skips assigning a port/shipyard dock_slot letter on
+    overshoot. Must stay in lock-step with `pilot_move_candidates` --
+    same eligible-punt filter, same iteration order -- since the two are
+    zipped together by `best_pilot_move_spec`."""
+    if pilot_size not in ("small", "large"):
+        raise ValueError(f"pilot_size must be 'small' or 'large', got {pilot_size!r}")
+
+    eligible = [p.id for p in state.punts if p.ware is not None and p.status == PuntStatus.ON_ROUTE]
+    specs: List[List[Tuple[int, int]]] = [[]]
+
+    if pilot_size == "small":
+        for punt_id in eligible:
+            specs.append([(punt_id, 1)])
+            specs.append([(punt_id, -1)])
+    else:
+        for punt_id in eligible:
+            specs.append([(punt_id, 2)])
+            specs.append([(punt_id, -2)])
+        for punt_a, punt_b in itertools.combinations(eligible, 2):
+            for delta_a, delta_b in itertools.product((1, -1), repeat=2):
+                specs.append([(punt_a, delta_a), (punt_b, delta_b)])
+
+    return specs
+
+
+def best_pilot_move_spec(
+    state: GameState,
+    beliefs: ShareBeliefs,
+    my_id: str,
+    pilot_size: str,
+    p_safe_if_caught: Optional[Numeric] = None,
+) -> List[Tuple[int, int]]:
+    """`best_pilot_move`'s winning choice as a `[(punt_id, delta), ...]`
+    spec instead of a mutator -- see `pilot_move_specs`. Ranked
+    identically (same candidates, same `total_rev_after` comparison,
+    same skip-first tie-break), just reported in a form a live caller can
+    actually execute against the real board."""
+    mutators = pilot_move_candidates(state, pilot_size)
+    specs = pilot_move_specs(state, pilot_size)
+    best_spec = specs[0]
+    best_impact = action_impact(state, beliefs, my_id, mutators[0], p_safe_if_caught)
+    for spec, mutator in zip(specs[1:], mutators[1:]):
+        impact = action_impact(state, beliefs, my_id, mutator, p_safe_if_caught)
+        if impact.total_rev_after > best_impact.total_rev_after:
+            best_spec, best_impact = spec, impact
+    return best_spec
 
 
 def pilot_slot_value(

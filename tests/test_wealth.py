@@ -14,6 +14,7 @@ from manilla.engine.models import (
     PLUNDER_PAYOUTS,
     Punt,
     PuntStatus,
+    SEA_ROUTE_LENGTH,
     SHARE_REPAY_AMOUNT,
     Share,
     Ware,
@@ -36,15 +37,19 @@ from manilla.engine.wealth import (
     apply_insurance_placement,
     apply_pilot_move,
     apply_pilot_placement,
+    apply_pirate_boarding,
     apply_pirate_placement,
     apply_ware_slot_placement,
     best_pilot_move,
+    best_pilot_move_spec,
+    best_pirate_boarding_move,
     encumbered_penalty,
     expected_accomplice_return,
     identify_rivals,
     insurance_ev,
     occupied_pilot_slots,
     pilot_move_candidates,
+    pilot_move_specs,
     pilot_slot_value,
     pirate_captain_boarding_bonus,
     pirate_slot_ev_if_taken_now,
@@ -789,6 +794,150 @@ class TestApplyPiratePlacement(unittest.TestCase):
             apply_pirate_placement("first-mate", "p0")
 
 
+class TestApplyPirateBoarding(unittest.TestCase):
+    def _boardable_state(self, ware=Ware.GINSENG, occupied_slots=0):
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p0"
+        punt = state.punts[0]
+        punt.ware = ware
+        punt.position = SEA_ROUTE_LENGTH
+        punt.status = PuntStatus.ON_ROUTE
+        punt.ware_slots = Punt.new(punt.id, ware).ware_slots
+        for slot in punt.ware_slots[:occupied_slots]:
+            slot.occupant = "p1"
+        state.movement_round_index = 2
+        return state, punt
+
+    def test_occupies_the_first_vacant_slot_and_vacates_the_boat_slot(self):
+        state, punt = self._boardable_state()
+        apply_pirate_boarding("captain", punt.id, "p0")(state)
+        self.assertEqual(punt.ware_slots[0].occupant, "p0")
+        self.assertIsNone(state.pirate_boat.captain.occupant)
+
+    def test_takes_the_first_vacant_slot_in_array_order_not_the_cheapest(self):
+        # Matches BoardSetupApp._show_boarding_dialog's board(): boarding
+        # is a free physical seizure, not a paid placement, so there's no
+        # "cheapest first" rule -- just whichever slot is first in the
+        # array that isn't already occupied.
+        state, punt = self._boardable_state(occupied_slots=1)
+        apply_pirate_boarding("captain", punt.id, "p0")(state)
+        self.assertEqual(punt.ware_slots[0].occupant, "p1")  # already occupied, untouched
+        self.assertEqual(punt.ware_slots[1].occupant, "p0")
+
+    def test_second_slot_name(self):
+        state, punt = self._boardable_state()
+        state.pirate_boat.second.occupant = "p1"
+        apply_pirate_boarding("second", punt.id, "p1")(state)
+        self.assertEqual(punt.ware_slots[0].occupant, "p1")
+        self.assertIsNone(state.pirate_boat.second.occupant)
+        self.assertEqual(state.pirate_boat.captain.occupant, "p0")  # untouched
+
+    def test_rejects_unknown_boat_slot_name(self):
+        with self.assertRaises(ValueError):
+            apply_pirate_boarding("first-mate", 0, "p0")
+
+    def test_no_ops_for_an_unknown_punt(self):
+        state, punt = self._boardable_state()
+        apply_pirate_boarding("captain", 999, "p0")(state)
+        self.assertIsNone(punt.ware_slots[0].occupant)
+        self.assertEqual(state.pirate_boat.captain.occupant, "p0")  # never vacated
+
+    def test_no_ops_when_the_punt_has_no_vacant_slot(self):
+        state, punt = self._boardable_state(occupied_slots=3)
+        apply_pirate_boarding("captain", punt.id, "p0")(state)
+        self.assertTrue(all(s.occupant == "p1" for s in punt.ware_slots))
+        self.assertEqual(state.pirate_boat.captain.occupant, "p0")  # never vacated
+
+
+class TestBestPirateBoardingMove(unittest.TestCase):
+    def test_boards_when_nothing_else_is_worth_staying_for(self):
+        # A single on-route punt, already stuck exactly on space 13 -- per
+        # the user, compare REV of boarding it for free against REV of
+        # staying a pirate. Staying is worth 0 here (a punt already sitting
+        # on 13 can never itself be caught by the mandatory third-throw
+        # plunder -- see pirate_captain_boarding_bonus's docstring -- and
+        # there's no other on-route punt to plunder instead), so boarding
+        # its full, unsplit payout should clearly win.
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p0"
+        punt = state.punts[0]
+        punt.ware = Ware.GINSENG
+        punt.position = SEA_ROUTE_LENGTH
+        punt.status = PuntStatus.ON_ROUTE
+        punt.ware_slots = Punt.new(punt.id, Ware.GINSENG).ware_slots
+        state.movement_round_index = 2
+        beliefs = infer_beliefs(state, "p0")
+
+        choice = best_pirate_boarding_move(state, beliefs, "p0", "captain", [punt.id])
+        self.assertEqual(choice, punt.id)
+
+    def test_stays_when_another_on_route_punt_is_worth_more(self):
+        # The boardable ginseng punt already has 2 of 3 slots taken, so
+        # boarding only nets a 3-way split (18 // 3 = 6). Two other
+        # on-route punts (jade, silk) are each independently catchable
+        # next round for a 1-pirate share of 6 and 5 respectively (36 // 6
+        # and 30 // 6) -- 11 total, more than boarding offers -- so
+        # staying a pirate for the mandatory third-throw plunder should
+        # win instead.
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p0"
+
+        boardable = state.punts[0]
+        boardable.ware = Ware.GINSENG
+        boardable.position = SEA_ROUTE_LENGTH
+        boardable.status = PuntStatus.ON_ROUTE
+        boardable.ware_slots = Punt.new(boardable.id, Ware.GINSENG).ware_slots
+        boardable.ware_slots[0].occupant = "p1"
+        boardable.ware_slots[1].occupant = "p1"
+
+        jade = state.punts[1]
+        jade.ware = Ware.JADE
+        jade.position = 12
+        jade.status = PuntStatus.ON_ROUTE
+        jade.ware_slots = Punt.new(jade.id, Ware.JADE).ware_slots
+
+        silk = state.punts[2]
+        silk.ware = Ware.SILK
+        silk.position = 12
+        silk.status = PuntStatus.ON_ROUTE
+        silk.ware_slots = Punt.new(silk.id, Ware.SILK).ware_slots
+
+        state.movement_round_index = 2
+        beliefs = infer_beliefs(state, "p0")
+
+        choice = best_pirate_boarding_move(state, beliefs, "p0", "captain", [boardable.id])
+        self.assertIsNone(choice)
+
+    def test_picks_the_best_among_several_boardable_punts(self):
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p0"
+
+        cheap = state.punts[0]
+        cheap.ware = Ware.GINSENG
+        cheap.position = SEA_ROUTE_LENGTH
+        cheap.status = PuntStatus.ON_ROUTE
+        cheap.ware_slots = Punt.new(cheap.id, Ware.GINSENG).ware_slots
+
+        rich = state.punts[1]
+        rich.ware = Ware.JADE
+        rich.position = SEA_ROUTE_LENGTH
+        rich.status = PuntStatus.ON_ROUTE
+        rich.ware_slots = Punt.new(rich.id, Ware.JADE).ware_slots
+
+        state.movement_round_index = 2
+        beliefs = infer_beliefs(state, "p0")
+
+        choice = best_pirate_boarding_move(state, beliefs, "p0", "captain", [cheap.id, rich.id])
+        self.assertEqual(choice, rich.id)
+
+    def test_none_when_no_punts_are_boardable(self):
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p0"
+        state.movement_round_index = 2
+        beliefs = infer_beliefs(state, "p0")
+        self.assertIsNone(best_pirate_boarding_move(state, beliefs, "p0", "captain", []))
+
+
 class TestApplyDockSlotPlacement(unittest.TestCase):
     def test_occupies_slot_a_first_and_deducts_its_price(self):
         state = _make_state()
@@ -1024,6 +1173,127 @@ class TestBestPilotMoveAndPilotSlotValue(unittest.TestCase):
         value_early = pilot_slot_value(early, infer_beliefs(early, "p0"), "p0", "small")
         value_late = pilot_slot_value(late, infer_beliefs(late, "p0"), "p0", "small")
         self.assertNotEqual(value_early, value_late)
+
+
+class TestPilotMoveSpecs(unittest.TestCase):
+    def _two_eligible_state(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[1].ware = Ware.NUTMEG
+        state.punts[1].status = PuntStatus.ON_ROUTE
+        state.punts[2].ware = None
+        return state
+
+    def test_stays_in_lock_step_with_pilot_move_candidates(self):
+        # best_pilot_move_spec zips these two lists together by index --
+        # a length or ordering drift between them would silently pair a
+        # spec with the wrong mutator.
+        for pilot_size in ("small", "large"):
+            with self.subTest(pilot_size=pilot_size):
+                state = self._two_eligible_state()
+                self.assertEqual(
+                    len(pilot_move_specs(state, pilot_size)),
+                    len(pilot_move_candidates(state, pilot_size)),
+                )
+
+    def test_first_spec_is_always_skip(self):
+        state = self._two_eligible_state()
+        self.assertEqual(pilot_move_specs(state, "small")[0], [])
+
+    def test_rejects_unknown_pilot_size(self):
+        state = _make_state()
+        with self.assertRaises(ValueError):
+            pilot_move_specs(state, "medium")
+
+
+class TestBestPilotMoveSpec(unittest.TestCase):
+    """Regression coverage for the 2026-08-28 fix wiring REV's pilot
+    lookahead into the actual live pilot-phase decision -- previously
+    `BoardSetupApp`/`selfplay` picked a pilot move at random regardless
+    of policy, never consulting this machinery at all."""
+
+    def test_matches_best_pilot_moves_own_choice(self):
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 11
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [
+            AccompliceSlot(price=1, occupant="p1"),
+            AccompliceSlot(price=2),
+            AccompliceSlot(price=3),
+        ]
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        state.movement_round_index = 2
+        state.players[1].cash = 500  # guarantee p1 counts as a rival
+        beliefs = infer_beliefs(state, "p0")
+
+        action, impact = best_pilot_move(state, beliefs, "p0", "small")
+        spec = best_pilot_move_spec(state, beliefs, "p0", "small")
+
+        # Replay the spec through the same wealth-estimation mutator and
+        # confirm it reproduces the identical winning impact.
+        if spec:
+            (punt_id, delta), = spec
+            replayed = action_impact(state, beliefs, "p0", apply_pilot_move(punt_id, delta))
+        else:
+            replayed = action_impact(state, beliefs, "p0", lambda s: None)
+        self.assertEqual(replayed.total_rev_after, impact.total_rev_after)
+
+    def test_pulls_two_punts_at_13_back_so_the_pilots_own_pirates_can_still_catch_them(self):
+        # Sitting exactly on 13 with one roll left is a GUARANTEED safe
+        # overshoot to port next roll (13 + any nonzero roll > 13) -- 0%
+        # plunder chance. Pulling either punt back by 1 gives a 1/6
+        # chance of landing back on exactly 13 and being caught. A
+        # pirate-pilot with no stake in the punts themselves should pull
+        # both back.
+        state = _make_state()
+        state.punts[0].ware = Ware.GINSENG
+        state.punts[0].position = 13
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[1].ware = Ware.NUTMEG
+        state.punts[1].position = 13
+        state.punts[1].status = PuntStatus.ON_ROUTE
+        state.punts[2].ware = None
+        state.movement_round_index = 2
+        state.pirate_boat.captain.occupant = "p0"
+        state.pilot_island.large.occupant = "p0"
+        state.players[1].cash = 500  # guarantee a rival exists
+
+        beliefs = infer_beliefs(state, "p0")
+        spec = best_pilot_move_spec(state, beliefs, "p0", "large")
+
+        self.assertEqual(sorted(spec), [(0, -1), (1, -1)])
+
+    def test_pushes_a_solely_owned_punt_forward_to_escape_a_rivals_pirates(self):
+        # A punt short of 13 with pirates aboard risks a 1/6 chance of
+        # being caught and plundered; pushing it to exactly 13 guarantees
+        # a safe overshoot next roll instead. Only meaningfully preferred
+        # over skipping once REV actually has a rival to score against
+        # (see the module's total_rev_after design -- it's 0 for every
+        # candidate, tied, when nobody is currently a rival).
+        state = _make_state()
+        state.punts[0].ware = Ware.JADE
+        state.punts[0].position = 12
+        state.punts[0].status = PuntStatus.ON_ROUTE
+        state.punts[0].ware_slots = [
+            AccompliceSlot(price=1, occupant="p0"),
+            AccompliceSlot(price=2),
+            AccompliceSlot(price=3),
+            AccompliceSlot(price=4),
+        ]
+        state.punts[1].ware = None
+        state.punts[2].ware = None
+        state.movement_round_index = 2
+        state.pirate_boat.captain.occupant = "p1"
+        state.pilot_island.small.occupant = "p0"
+        state.players[1].cash = 500  # guarantee p1 counts as a rival
+
+        beliefs = infer_beliefs(state, "p0")
+        spec = best_pilot_move_spec(state, beliefs, "p0", "small")
+
+        self.assertEqual(spec, [(0, 1)])
 
 
 class TestOccupiedPilotSlots(unittest.TestCase):
