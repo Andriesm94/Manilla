@@ -133,16 +133,14 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         # 30 (silk's plunder payout) split across its 1 occupied slot
         # (already resolved, not projected). p0's lone pirate captaincy is
         # valued using exactly the 1 pirate actually aboard -- no
-        # projection, see test_pirate_valuation_never_projects_occupancy --
-        # plus the round-1/2 free-boarding bonus (movement_round_index=0
-        # here), see TestPirateCaptainBoardingBonus.
+        # projection, see test_pirate_valuation_never_projects_occupancy.
+        # No free-boarding bonus here -- per the user, pirate valuation is
+        # plunder-only (see TestPirateCaptainBoardingBonus for that
+        # function's own, now-unused-by-this-one, standalone behavior).
         pirate_part = pirate_expected_payout(
             [(Ware.GINSENG, 8, 3), (Ware.NUTMEG, 5, 3)], pirate_count=1
         )
-        boarding_bonus = pirate_captain_boarding_bonus(state)
-        self.assertEqual(
-            expected_accomplice_return(state, beliefs, "p0"), Fraction(30) + pirate_part + boarding_bonus
-        )
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p0"), Fraction(30) + pirate_part)
 
     def test_pirate_valuation_never_projects_occupancy(self):
         # Unlike ware punts, the pirate boat gets no occupancy projection at
@@ -473,12 +471,11 @@ class TestPirateSlotEvIfTakenNow(unittest.TestCase):
         state.punts[0].status = PuntStatus.IN_PORT
         self.assertEqual(pirate_slot_ev_if_taken_now(state), -PIRATE_PRICE)
 
-    def test_captain_role_includes_the_free_boarding_bonus(self):
-        # Regression test: this is exactly what the user's own bug report
-        # traced -- the board's displayed pirate EV looked much smaller
-        # than what the bot actually acted on, because
-        # pirate_captain_boarding_bonus (often the *larger* of the two
-        # terms early in a voyage) was missing from it entirely.
+    def test_captain_role_excludes_the_free_boarding_bonus(self):
+        # Per the user: pirate valuation is plunder-only. Even in a
+        # scenario where pirate_captain_boarding_bonus would be nonzero
+        # (a real boarding chance exists), the displayed/decision EV
+        # shouldn't include it.
         state = _make_state()
         state.movement_round_index = 0  # boarding opportunity still ahead
         punt = state.punts[0]
@@ -489,13 +486,10 @@ class TestPirateSlotEvIfTakenNow(unittest.TestCase):
 
         p_caught = position_outcomes(6, state.movement_rounds_total - state.movement_round_index)["caught_on_13"]
         plunder_ev = p_caught * PLUNDER_PAYOUTS[Ware.JADE] - PIRATE_PRICE
-        boarding = pirate_captain_boarding_bonus(state)
-        self.assertGreater(boarding, 0)  # sanity: this scenario has a real boarding chance
-        self.assertEqual(pirate_slot_ev_if_taken_now(state), plunder_ev + boarding)
+        self.assertGreater(pirate_captain_boarding_bonus(state), 0)  # sanity: a real boarding chance exists
+        self.assertEqual(pirate_slot_ev_if_taken_now(state), plunder_ev)
 
-    def test_second_role_does_not_include_the_boarding_bonus(self):
-        # Only the captain gets the free-boarding privilege -- see
-        # pirate_captain_boarding_bonus's docstring.
+    def test_second_role_also_excludes_the_boarding_bonus(self):
         state = _make_state()
         state.movement_round_index = 0
         punt = state.punts[0]
@@ -538,7 +532,7 @@ class TestPirateCaptainBoardingBonus(unittest.TestCase):
         self._punt_with_vacancy(state, 0, Ware.GINSENG, 8, occupied_slots=1, total_slots=3)
         state.movement_round_index = 1  # 1 round until the boarding roll
         p_boardable = position_outcomes(8, 1)["caught_on_13"]
-        expected = p_boardable * (PLUNDER_PAYOUTS[Ware.GINSENG] // 2)  # occupied(1) + captain
+        expected = p_boardable * (PLUNDER_PAYOUTS[Ware.GINSENG] // 3)  # split across all 3 slots -- the captain boards the last one
         self.assertEqual(pirate_captain_boarding_bonus(state), expected)
 
     def test_sums_across_multiple_boardable_punts(self):
@@ -566,22 +560,32 @@ class TestPirateCaptainBoardingBonus(unittest.TestCase):
         state.movement_round_index = 0
         self.assertEqual(pirate_captain_boarding_bonus(state), 0)
 
-    def test_assumes_occupied_plus_one_not_full_capacity(self):
-        # A ginseng punt with 1 of 3 slots taken: the bonus should value
-        # the captain's free seat as splitting 2 ways (occupied + captain),
-        # not 3 ways as project_final_occupancy's "assume full" would.
+    def test_assumes_the_captain_boards_the_last_available_slot(self):
+        # A ginseng punt with 1 of 3 slots taken: per the user, the bonus
+        # values the captain's free seat as splitting the full 3-slot
+        # capacity, not just the 2 slots that would be occupied (the
+        # existing occupant + the captain) if no further regular
+        # accomplice ever joined in the meantime.
         state = _make_state()
         self._punt_with_vacancy(state, 0, Ware.GINSENG, 8, occupied_slots=1, total_slots=3)
         state.movement_round_index = 1
         p_boardable = position_outcomes(8, 1)["caught_on_13"]
         two_way_share = p_boardable * (PLUNDER_PAYOUTS[Ware.GINSENG] // 2)
         three_way_share = p_boardable * (PLUNDER_PAYOUTS[Ware.GINSENG] // 3)
-        self.assertEqual(pirate_captain_boarding_bonus(state), two_way_share)
-        self.assertNotEqual(pirate_captain_boarding_bonus(state), three_way_share)
+        self.assertEqual(pirate_captain_boarding_bonus(state), three_way_share)
+        self.assertNotEqual(pirate_captain_boarding_bonus(state), two_way_share)
 
 
-class TestBoardingBonusOnlyAppliesToTheCaptain(unittest.TestCase):
-    def test_captain_gets_the_bonus_second_does_not(self):
+class TestExpectedAccompliceReturnExcludesBoardingBonus(unittest.TestCase):
+    def test_neither_captain_nor_second_gets_the_bonus(self):
+        # Regression test: expected_accomplice_return used to add
+        # pirate_captain_boarding_bonus for the captain specifically (and
+        # correctly withheld it from the second). Per the user, pirate
+        # valuation is now plunder-only for *both* roles -- confirmed by
+        # checking the standalone bonus really is nonzero here (so this
+        # scenario would have caught a regression), while
+        # expected_accomplice_return reflects only the plain pirate split
+        # for each.
         state = _make_state()
         state.punts[0].ware = Ware.GINSENG
         state.punts[0].position = 8
@@ -592,12 +596,11 @@ class TestBoardingBonusOnlyAppliesToTheCaptain(unittest.TestCase):
         state.pirate_boat.second.occupant = "p1"
         beliefs = infer_beliefs(state, "p0")
 
-        bonus = pirate_captain_boarding_bonus(state)
-        self.assertGreater(bonus, 0)
+        self.assertGreater(pirate_captain_boarding_bonus(state), 0)  # sanity: a real bonus exists
 
         punts = [(Ware.GINSENG, 8, 3)]
         plain_pirate_part = pirate_expected_payout(punts, pirate_count=2)
-        self.assertEqual(expected_accomplice_return(state, beliefs, "p0"), plain_pirate_part + bonus)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p0"), plain_pirate_part)
         self.assertEqual(expected_accomplice_return(state, beliefs, "p1"), plain_pirate_part)
 
 

@@ -45,11 +45,11 @@ class TestPirateBoatEvDisplay(unittest.TestCase):
 
         self.assertTrue(any(t.startswith("EV:") for t in self._canvas_texts()))
 
-    def test_ev_line_breaks_out_the_captains_boarding_bonus(self):
-        # Regression test for the user's bug report: the displayed EV used
-        # to omit pirate_captain_boarding_bonus entirely, making the
-        # number on the board look much smaller than what actually drove
-        # a bot to take the captain's seat first.
+    def test_ev_line_excludes_the_captains_boarding_bonus(self):
+        # Per the user, pirate valuation is plunder-only -- the displayed
+        # EV should never break out (or include) the captain's free
+        # mid-voyage boarding bonus, even in a scenario where it would be
+        # a real, nonzero opportunity.
         punt = self.state.punts[0]
         punt.ware = Ware.JADE
         punt.ware_slots = Punt.new(punt.id, Ware.JADE).ware_slots
@@ -58,7 +58,7 @@ class TestPirateBoatEvDisplay(unittest.TestCase):
         self.state.movement_round_index = 0
         self.app.refresh()
 
-        self.assertTrue(any("boarding +" in t for t in self._canvas_texts()))
+        self.assertFalse(any("boarding" in t for t in self._canvas_texts()))
 
     def test_no_ev_line_once_the_boat_is_fully_crewed(self):
         self.state.pirate_boat.captain.occupant = self.state.players[0].id

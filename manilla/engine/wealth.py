@@ -94,16 +94,15 @@ Whoever is about to place an accomplice of their own should run this first
 and reason against the *predicted* board, not the literal current one --
 the pilot isn't going to wait for anyone else to notice it.
 
-The pirate captain has a second source of value beyond the mandatory
-end-of-voyage plunder `pirate_expected_payout` already covers: a punt that
-lands exactly on space SEA_ROUTE_LENGTH right after the *second* dice
-throw is guaranteed to overshoot on the third and complete its voyage
-safely, so the captain may seize one of its still-vacant ware slots for
-free right then (`BoardSetupApp._handle_pirate_boarding`) -- a free ware
-accomplice, not a price to weigh. `pirate_captain_boarding_bonus` only
-matters while placing during the first or second accomplice round, before
-that roll has happened, and only for the captain -- per the user, the
-second pirate's own equivalent opportunity is deliberately left unmodeled.
+The pirate captain also gets a free mid-voyage boarding opportunity right
+after the second dice throw (`BoardSetupApp._handle_pirate_boarding`), on
+top of the mandatory end-of-voyage plunder `pirate_expected_payout` already
+covers. `pirate_captain_boarding_bonus` values that opportunity, but per
+the user it's deliberately excluded from every wealth/REV calculation in
+this module -- pirate valuation here counts only the possible loot from the
+mandatory plunder after the third dice throw, nothing from boarding. The
+function stays defined for reference/standalone use; nothing in
+`expected_accomplice_return` or `pirate_slot_ev_if_taken_now` calls it.
 """
 
 from __future__ import annotations
@@ -277,11 +276,20 @@ def pirate_captain_boarding_bonus(state: GameState) -> Fraction:
     regular ware-accomplice placements are assumed to land there in the
     meantime, unlike `project_final_occupancy`'s "assume full" default for
     valuing those regular placements over the whole rest of the voyage.
-    The captain can only physically board one punt even if several turn
-    out to qualify simultaneously; this sums each punt's contribution
-    independently rather than modeling which single one would actually be
-    chosen, slightly overstating the rare case where more than one is
-    boardable at once.
+    The captain is assumed to board the *last* available slot, splitting
+    the cargo profit across every slot the punt has (`len(punt.ware_slots)`),
+    not just however many happen to be occupied right now. The captain can
+    only physically board one punt even if several turn out to qualify
+    simultaneously; this sums each punt's contribution independently
+    rather than modeling which single one would actually be chosen,
+    slightly overstating the rare case where more than one is boardable
+    at once.
+
+    Per the user, this value is deliberately excluded from every
+    wealth/REV calculation in this module (`expected_accomplice_return`,
+    `pirate_slot_ev_if_taken_now`) -- pirate valuation there counts only
+    the mandatory end-of-voyage plunder. This function stays defined for
+    reference/standalone use only; nothing calls it.
     """
     rounds_until_boarding = 2 - state.movement_round_index
     if rounds_until_boarding <= 0:
@@ -295,7 +303,7 @@ def pirate_captain_boarding_bonus(state: GameState) -> Fraction:
         if occupied >= len(punt.ware_slots):
             continue  # no vacant slot for the captain to seize
         p_boardable = position_outcomes(punt.position, rounds_until_boarding)["caught_on_13"]
-        share = PLUNDER_PAYOUTS[punt.ware] // (occupied + 1)
+        share = PLUNDER_PAYOUTS[punt.ware] // len(punt.ware_slots)
         bonus += p_boardable * share
 
     return bonus
@@ -307,7 +315,11 @@ def expected_accomplice_return(
     """The sum of gross expected payouts across every accomplice slot
     `player_id` currently occupies -- ware punts, port, shipyard, and the
     pirate boat -- valued gross (no price subtracted) since the price was
-    already paid and is already reflected in their current cash.
+    already paid and is already reflected in their current cash. Pirate
+    valuation is plunder-only: `pirate_captain_boarding_bonus` (the
+    captain-only free mid-voyage boarding opportunity) is deliberately
+    excluded, per the user -- only the mandatory loot from the third dice
+    throw's plunder is counted, for either pirate role.
 
     `p_safe_if_caught` defaults to `None`, meaning "derive it from whether
     the pirate boat is actually occupied" (`pirate_threat`) rather than
@@ -354,8 +366,6 @@ def expected_accomplice_return(
             if p.ware is not None and p.status == PuntStatus.ON_ROUTE
         ]
         total += pirate_expected_payout(punts, current_pirate_count)
-        if player_id == pirate_ids["captain"]:
-            total += pirate_captain_boarding_bonus(state)
 
     return total
 
@@ -367,17 +377,11 @@ def pirate_slot_ev_if_taken_now(state: GameState) -> Optional[Fraction]:
     or_remove_pirate_slot`'s "captain always fills first" rule. `None` if
     the boat is already fully crewed (nothing left to take).
 
-    For the captain role specifically, this also adds
-    `pirate_captain_boarding_bonus` -- the captain-only free mid-voyage
-    boarding opportunity (see that function's docstring) that
-    `expected_accomplice_return` folds into the captain's own wealth the
-    moment they board, and which the REV-based pirate candidate in
-    `policy.py` is scored against via `action_impact`. Leaving it out here
-    would make this number look far smaller than what the decision engine
-    is actually weighing -- early in a voyage that bonus is routinely the
-    *larger* of the two terms, which is exactly what can make taking the
-    captain's seat look like a modest play by plunder EV alone while
-    actually being the clear best move once boarding is counted too.
+    Plunder-only, per the user: `pirate_captain_boarding_bonus` (the
+    captain-only free mid-voyage boarding opportunity) is deliberately not
+    added here, matching `expected_accomplice_return` -- this counts only
+    the possible loot from the mandatory plunder after the third dice
+    throw, for either role.
 
     Deliberately *not* REV, though: this is still just the player-
     independent payoff, not netted against any rival's wealth change --
@@ -388,10 +392,8 @@ def pirate_slot_ev_if_taken_now(state: GameState) -> Optional[Fraction]:
     pb = state.pirate_boat
     if pb.captain.occupant is None:
         pirate_count = 1
-        is_captain = True
     elif pb.second.occupant is None:
         pirate_count = 2
-        is_captain = False
     else:
         return None
     punts = [
@@ -399,10 +401,7 @@ def pirate_slot_ev_if_taken_now(state: GameState) -> Optional[Fraction]:
         for p in state.punts
         if p.ware is not None and p.status == PuntStatus.ON_ROUTE
     ]
-    ev = pirate_slot_ev(punts, pirate_count)
-    if is_captain:
-        ev += pirate_captain_boarding_bonus(state)
-    return ev
+    return pirate_slot_ev(punts, pirate_count)
 
 
 #: Defensive margin added to every *opponent's* wealth_estimate (never the
