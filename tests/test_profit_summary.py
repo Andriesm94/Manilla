@@ -1,18 +1,14 @@
-"""Regression tests for a bug: pirate plunder payouts and the insurance
-occupant's upfront payment were real (players did receive the cash) but
-never appeared in the round-end "Voyage profit summary" notification --
-only port/shipyard rewards, ware-cargo splits, and insurance repair costs
-were included. Fixed by having `_pay_pirate_plunder` report what it paid
-out and folding it, plus a new `_voyage_bonus_payouts` tracker for the
-insurance payment (paid at placement time, well before round-end), into
-the same summary.
+"""Regression tests for the "Voyage profit summary" shown in the Profit
+Distribution notification.
 
-All of this -- pirate plunder, ware/port/shipyard profits, insurance
-repairs, and the ware-value rise -- is computed together by
-`_distribute_profits`, only once "Continue to Profit Distribution" is
-explicitly clicked (see the "Voyage complete" gate in
-`_show_profit_distribution_gate`), not automatically the instant the
-third roll resolves.
+It compares each player's cash now against their cash at the very start
+of this voyage's accomplice-placement phase (`_cash_at_round_start`,
+snapshotted in `_apply_load_and_place`) -- covering every cash movement
+all voyage (accomplice placement costs, the insurance bonus, every
+round-end payout) rather than an itemized list that has to remember to
+include each source. `_distribute_profits` (see `_show_profit_
+distribution_gate`) is where this summary gets built, only once
+"Continue to Profit Distribution" is explicitly clicked.
 """
 
 import os
@@ -24,7 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manilla.ui.board_setup import BoardSetupApp
-from manilla.engine.models import GameState, Punt, PuntStatus, SEA_ROUTE_LENGTH, Ware
+from manilla.engine.models import Punt, PuntStatus, Ware
 
 
 class ProfitSummaryTestCase(unittest.TestCase):
@@ -47,120 +43,67 @@ class ProfitSummaryTestCase(unittest.TestCase):
         punt.position = position
         return punt
 
-    def find_toplevels(self, title_substr):
-        return [
-            t for t in self.root.winfo_children() if isinstance(t, tk.Toplevel) and title_substr in t.title()
-        ]
 
-    def all_widgets(self, widget):
-        acc = [widget]
-        for child in widget.winfo_children():
-            acc.extend(self.all_widgets(child))
-        return acc
+class TestCashSnapshotAtRoundStart(ProfitSummaryTestCase):
+    def test_load_and_place_snapshots_every_players_cash(self):
+        for i, player in enumerate(self.state.players):
+            player.cash = 30 + i
+        harbor_master = self.state.players[0]
+        loaded = [Ware.NUTMEG, Ware.SILK, Ware.GINSENG]
+        positions = {Ware.NUTMEG: 3, Ware.SILK: 3, Ware.GINSENG: 3}
 
-    def button_in(self, widget, text_contains):
-        return next(
-            w for w in self.all_widgets(widget) if w.winfo_class() == "TButton" and text_contains in w.cget("text")
-        )
+        self.app._apply_load_and_place(harbor_master, loaded, positions)
 
-    def click_continue_to_profit_distribution(self):
-        gate = self.find_toplevels("Voyage complete")
-        self.assertEqual(len(gate), 1, "expected the profit-distribution gate to be showing")
-        self.button_in(gate[0], "Continue to Profit Distribution").invoke()
+        self.assertEqual(self.app._cash_at_round_start, {p.id: p.cash for p in self.state.players})
 
 
-class TestPayPiratePlunderReportsItsPayouts(ProfitSummaryTestCase):
-    def test_returns_the_color_and_share_paid_to_each_pirate(self):
-        punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
+class TestVoyageProfitSummarySignFormatting(ProfitSummaryTestCase):
+    def test_positive_negative_and_zero_deltas_are_formatted_correctly(self):
         players = self.state.players
-        self.state.pirate_boat.captain.occupant = players[0].id
-        self.state.pirate_boat.second.occupant = players[1].id
+        self.app._cash_at_round_start = {p.id: p.cash for p in players}
+        players[0].cash += 10  # positive delta
+        players[1].cash -= 7  # negative delta
+        # players[2] (and beyond) stay untouched -- zero delta
 
-        paid = self.app._pay_pirate_plunder([punt])
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
+            self.app._distribute_profits([], then=None)
+            message = showinfo.call_args[0][1]
 
-        expected_share = 24 // 2  # NUTMEG plunder payout split two ways
-        self.assertEqual(set(paid), {(players[0].color, expected_share), (players[1].color, expected_share)})
-
-    def test_empty_when_no_pirates_are_aboard(self):
-        punt = self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
-        paid = self.app._pay_pirate_plunder([punt])
-        self.assertEqual(paid, [])
-
-
-class TestVoyageBonusPayoutsTracksInsurance(ProfitSummaryTestCase):
-    def test_placing_insurance_records_a_positive_bonus_payout(self):
-        player = self.state.players[0]
-        self.state.current_turn_player_id = player.id
-        before = player.cash
-
-        self.app._place_or_remove_insurance()
-
-        payment = self.state.insurance.payment
-        self.assertEqual(player.cash, before + payment)
-        self.assertIn((player.color, payment), self.app._voyage_bonus_payouts)
-
-    def test_removing_insurance_records_a_matching_negative_entry(self):
-        player = self.state.players[0]
-        self.state.current_turn_player_id = player.id
-        self.app._place_or_remove_insurance()  # place
-        self.app._place_or_remove_insurance()  # remove (click again)
-
-        payment = self.state.insurance.payment
-        total = sum(amount for color, amount in self.app._voyage_bonus_payouts if color == player.color)
-        self.assertEqual(total, 0)
+        self.assertIn(f"{players[0].color}: +10", message)
+        self.assertIn(f"{players[1].color}: -7", message)
+        self.assertIn(f"{players[2].color}: +0", message)
 
 
-class TestRoundEndSummaryIncludesEverything(ProfitSummaryTestCase):
-    def test_plunder_and_insurance_payouts_appear_in_the_voyage_profit_summary(self):
+class TestVoyageProfitSummaryReflectsNetChange(ProfitSummaryTestCase):
+    def test_summary_captures_placement_costs_ware_profit_and_port_reward_together(self):
+        """The old itemized "what got paid" list never included accomplice
+        placement costs at all -- this diffs total cash instead, so it
+        can't miss anything, whatever the source."""
         players = self.state.players
-        pirate_player = players[0]
-        insurance_player = players[1]
+        harbor_master = players[0]
+        loaded = [Ware.NUTMEG, Ware.SILK, Ware.GINSENG]
+        positions = {Ware.NUTMEG: 3, Ware.SILK: 3, Ware.GINSENG: 3}
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo"):
+            self.app._apply_load_and_place(harbor_master, loaded, positions)  # snapshots cash here
 
-        # An insurance payment from earlier in the voyage (placement-time,
-        # well before this round's payouts get computed).
-        self.state.insurance.occupant = insurance_player.id
-        self.app._voyage_bonus_payouts = [(insurance_player.color, self.state.insurance.payment)]
+        # A placement cost between the snapshot and distribution -- the
+        # kind of cash movement an itemized payout list never captured.
+        players[0].cash -= 4
 
-        # A punt one roll away from space 13, with the third movement
-        # round about to happen, and a pirate captain aboard to plunder it.
-        self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH - 1)
-        for punt in self.state.punts[1:]:
-            punt.ware = None
-        self.state.pirate_boat.captain.occupant = pirate_player.id
-        self.state.movement_round_index = 2
-        pirate_player.is_bot = True  # skip the human port-vs-shipyard dialog
+        punt = self.state.punts[0]  # loaded with NUTMEG (payout 24)
+        punt.status = PuntStatus.IN_PORT
+        punt.dock_slot = "A"
+        punt.ware_slots[0].occupant = players[1].id  # sole ware accomplice -> full 24
+        self.state.port.slots["A"].occupant = players[2].id  # port slot A pays 6
+        self.state.movement_round_index = 3
 
-        with mock.patch("manilla.ui.board_setup.random.randint", return_value=1), mock.patch(
-            "manilla.ui.board_setup.random.random", return_value=0.0
-        ), mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
-            self.app._roll_dice_and_move()
-            showinfo.assert_called_once()  # just the roll summary so far -- nobody's been paid yet
-            self.click_continue_to_profit_distribution()
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
+            self.app._distribute_profits([], then=None)
+            message = showinfo.call_args[0][1]
 
-        message = showinfo.call_args_list[-1].args[1]
-        self.assertIn("Voyage profit summary", message)
-        self.assertIn(pirate_player.color, message)
-        self.assertIn(insurance_player.color, message)
-
-    def test_voyage_bonus_payouts_are_cleared_after_being_folded_in(self):
-        players = self.state.players
-        self.app._voyage_bonus_payouts = [(players[0].color, 10)]
-
-        self.make_punt(0, Ware.NUTMEG, SEA_ROUTE_LENGTH)
-        for punt in self.state.punts[1:]:
-            punt.ware = None
-        self.state.movement_round_index = 2
-
-        with mock.patch("manilla.ui.board_setup.random.randint", return_value=1), mock.patch(
-            "manilla.ui.board_setup.messagebox.showinfo"
-        ):
-            self.app._roll_dice_and_move()
-            self.assertEqual(
-                self.app._voyage_bonus_payouts, [(players[0].color, 10)], "still pending -- gate not clicked yet"
-            )
-            self.click_continue_to_profit_distribution()
-
-        self.assertEqual(self.app._voyage_bonus_payouts, [])
+        self.assertIn(f"{players[0].color}: -4", message)
+        self.assertIn(f"{players[1].color}: +24", message)
+        self.assertIn(f"{players[2].color}: +6", message)
 
 
 if __name__ == "__main__":

@@ -27,6 +27,7 @@ class TkTestCase(unittest.TestCase):
 
     def setUp(self):
         self.root = tk.Tk()
+        self.root.withdraw()  # the class name promises "never-shown" -- this is what actually makes that true
         self.app = BoardSetupApp(self.root)
         self.app.pack(fill=tk.BOTH, expand=True)
         self.state = self.app.state_obj
