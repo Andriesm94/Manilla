@@ -113,7 +113,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Callable, Dict, Iterable, List, Optional, Tuple
 
-from manilla.engine.beliefs import ShareBeliefs, ShareSignal, infer_beliefs, share_value_estimate
+from manilla.engine.beliefs import ShareBeliefs, ShareSignal, assumed_share_count, infer_beliefs, share_value_estimate
 from manilla.engine.expected_value import (
     Numeric,
     dock_fill_distribution,
@@ -215,7 +215,30 @@ def _ware_slot_gross_per_accomplice(state: GameState, punt, p_safe_if_caught: Nu
     )
 
 
-def _dock_arrival_probs(state: GameState, destination: str) -> List[Numeric]:
+def _p_port_if_caught_on_13(state: GameState, beliefs: ShareBeliefs, ware: Ware) -> Fraction:
+    """Whether a punt of `ware` caught on space SEA_ROUTE_LENGTH counts
+    toward *port* arrival rather than the shipyard: 1 if no pirates are
+    aboard at all (no ambush -- always a normal port arrival), otherwise
+    a deterministic assumption about the deciding pirate's own
+    self-interest (the captain if aboard, else the lone second -- see
+    `BoardSetupApp._resolve_plunder`'s "who decides" rule). Per the user:
+    sending a plundered punt to port raises `ware`'s black-market value
+    (`BoardSetupApp._raise_ware_values_for_arrivals` only checks
+    `IN_PORT`, regardless of how a punt got there), so assume the decider
+    sends it to port -- 1 -- exactly when they're believed to hold *more*
+    shares of `ware` than `beliefs.viewer_id` does, and to the shipyard
+    instead -- 0 -- otherwise, denying that rise.
+    """
+    pb = state.pirate_boat
+    decider_id = pb.captain.occupant or pb.second.occupant
+    if decider_id is None:
+        return Fraction(1)
+    decider_shares = assumed_share_count(state, beliefs, decider_id, ware)
+    viewer_shares = assumed_share_count(state, beliefs, beliefs.viewer_id, ware)
+    return Fraction(1) if decider_shares > viewer_shares else Fraction(0)
+
+
+def _dock_arrival_probs(state: GameState, beliefs: ShareBeliefs, destination: str) -> List[Numeric]:
     rounds_remaining = _rounds_remaining(state)
     target_status = PuntStatus.IN_PORT if destination == "port" else PuntStatus.IN_SHIPYARD
     probs: List[Numeric] = []
@@ -225,10 +248,13 @@ def _dock_arrival_probs(state: GameState, destination: str) -> List[Numeric]:
         if punt.status == target_status:
             probs.append(1)
         elif punt.status == PuntStatus.ON_ROUTE:
+            p_port_if_caught = _p_port_if_caught_on_13(state, beliefs, punt.ware)
             if destination == "port":
-                probs.append(punt_port_probability(punt.position, rounds_remaining))
+                probs.append(punt_port_probability(punt.position, rounds_remaining, p_port_if_caught))
             else:
-                probs.append(punt_shipyard_probability(punt.position, rounds_remaining))
+                probs.append(
+                    punt_shipyard_probability(punt.position, rounds_remaining, 1 - p_port_if_caught)
+                )
         else:
             probs.append(0)  # docked at the other destination, or captured
     return probs
@@ -276,7 +302,7 @@ def pirate_captain_boarding_bonus(state: GameState) -> Fraction:
 
 
 def expected_accomplice_return(
-    state: GameState, player_id: str, p_safe_if_caught: Optional[Numeric] = None
+    state: GameState, beliefs: ShareBeliefs, player_id: str, p_safe_if_caught: Optional[Numeric] = None
 ) -> Fraction:
     """The sum of gross expected payouts across every accomplice slot
     `player_id` currently occupies -- ware punts, port, shipyard, and the
@@ -286,7 +312,12 @@ def expected_accomplice_return(
     `p_safe_if_caught` defaults to `None`, meaning "derive it from whether
     the pirate boat is actually occupied" (`pirate_threat`) rather than
     assume a fixed value -- pass an explicit override only for a
-    counterfactual.
+    counterfactual. This only governs *ware-punt* accomplices, which are
+    wiped out the instant plunder happens regardless of where the punt
+    ends up (`BoardSetupApp._resolve_plunder` clears `ware_slots`
+    unconditionally). Port/shipyard accomplices are valued separately via
+    `_dock_arrival_probs`/`_p_port_if_caught_on_13`, which need `beliefs`
+    to guess which destination a plundered punt actually gets sent to.
 
     Returns 0 once the voyage has settled (`_SETTLED_PHASES`), since by then
     every pending payout is already in players' cash rather than still
@@ -311,7 +342,7 @@ def expected_accomplice_return(
             if slot.occupant != player_id:
                 continue
             if arrival_probs is None:
-                arrival_probs = _dock_arrival_probs(state, destination)
+                arrival_probs = _dock_arrival_probs(state, beliefs, destination)
             total += dock_slot_expected_payout(destination, key, arrival_probs)
 
     pirate_ids = {"captain": state.pirate_boat.captain.occupant, "second": state.pirate_boat.second.occupant}
@@ -399,7 +430,7 @@ def wealth_estimate(
         Fraction(player.cash)
         + share_value_estimate(state, beliefs, player_id)
         - encumbered_penalty(player)
-        + expected_accomplice_return(state, player_id, p_safe_if_caught)
+        + expected_accomplice_return(state, beliefs, player_id, p_safe_if_caught)
     )
     if player_id != beliefs.viewer_id:
         estimate += DEFENSIVE_WEALTH_MARGIN

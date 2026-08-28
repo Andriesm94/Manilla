@@ -40,6 +40,28 @@ class TestPuntProbabilities(unittest.TestCase):
         # 8 + (1..4) falls short of 13 regardless of pirates.
         self.assertEqual(punt_shipyard_probability(8, 1), Fraction(4, 6))
 
+    def test_shipyard_probability_defaults_p_sent_to_shipyard_if_caught_to_zero(self):
+        # start=12, 1 round left: die 1 lands exactly on 13 (caught), dice
+        # 2-6 overshoot (arrived) -- nothing falls short, so the only way
+        # this punt reaches the shipyard at all is via that catch. With
+        # the default p_sent_to_shipyard_if_caught=0, that contributes
+        # nothing (matches "assume no pirates, or that they'd send it to
+        # port instead").
+        self.assertEqual(punt_shipyard_probability(12, 1), Fraction(0))
+
+    def test_shipyard_probability_adds_the_caught_on_13_contribution(self):
+        # This is punt_port_probability's p_safe_if_caught complement for
+        # the same caught-on-13 event -- half-safe (half sent to port)
+        # should mean the other half is credited to the shipyard here, and
+        # together they should account for the whole "didn't fall short"
+        # probability (arrived + caught_on_13) regardless of the split.
+        half_shipyard = punt_shipyard_probability(12, 1, p_sent_to_shipyard_if_caught=Fraction(1, 2))
+        self.assertEqual(half_shipyard, Fraction(1, 12))
+        self.assertEqual(
+            punt_port_probability(12, 1, p_safe_if_caught=Fraction(1, 2)) + half_shipyard,
+            Fraction(1, 1),
+        )
+
 
 class TestWareSlotEV(unittest.TestCase):
     def test_matches_hand_computation_for_a_simple_case(self):

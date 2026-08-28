@@ -60,11 +60,23 @@ def punt_port_probability(start: int, rounds_remaining: int, p_safe_if_caught: N
     return outcomes["arrived"] + outcomes["caught_on_13"] * _as_fraction(p_safe_if_caught)
 
 
-def punt_shipyard_probability(start: int, rounds_remaining: int) -> Fraction:
-    """Probability a punt at `start` is shipwrecked to the shipyard --
-    unaffected by pirates, who only ever intercept a punt sitting exactly on
-    space SEA_ROUTE_LENGTH, never one that falls short of it."""
-    return position_outcomes(start, rounds_remaining)["shipwrecked"]
+def punt_shipyard_probability(
+    start: int, rounds_remaining: int, p_sent_to_shipyard_if_caught: Numeric = 0
+) -> Fraction:
+    """Probability a punt at `start` ends up in the shipyard: either it
+    falls short of space SEA_ROUTE_LENGTH after all rounds (shipwrecked,
+    unaffected by pirates -- they only ever intercept a punt sitting
+    exactly on that space), or it lands exactly on it and pirates present
+    choose to send it to the shipyard instead of port
+    (`p_sent_to_shipyard_if_caught`, default 0 = assume no pirates are
+    aboard, or that they'd send it to port instead). This is
+    `punt_port_probability`'s `p_safe_if_caught` complement for the same
+    caught-on-13 event -- a caller resolving one should resolve the other
+    the same way (`1 - p_safe_if_caught`), or the two probabilities won't
+    add up to what actually happens to that punt.
+    """
+    outcomes = position_outcomes(start, rounds_remaining)
+    return outcomes["shipwrecked"] + outcomes["caught_on_13"] * _as_fraction(p_sent_to_shipyard_if_caught)
 
 
 def ware_slot_expected_payout(

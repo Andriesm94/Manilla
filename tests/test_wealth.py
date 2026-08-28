@@ -30,6 +30,7 @@ from manilla.engine.expected_value import (
 from manilla.engine.probability import position_outcomes
 from manilla.engine.wealth import (
     DEFENSIVE_WEALTH_MARGIN,
+    _p_port_if_caught_on_13,
     action_impact,
     apply_dock_slot_placement,
     apply_insurance_placement,
@@ -121,11 +122,13 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         # captaincy (set up by _rigged_state) makes p_safe_if_caught auto-
         # derive to 0 -- plunder is certain if this punt gets caught on 13.
         state = self._rigged_state()
+        beliefs = infer_beliefs(state, "p0")
         expected = ware_slot_expected_payout(Ware.GINSENG, 8, 3, accomplices_on_punt=3, p_safe_if_caught=0)
-        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p1"), expected)
 
     def test_docked_ware_slot_pays_out_with_certainty(self):
         state = self._rigged_state()
+        beliefs = infer_beliefs(state, "p0")
         # Silk punt already in port: certain payout, no dice math needed --
         # 30 (silk's plunder payout) split across its 1 occupied slot
         # (already resolved, not projected). p0's lone pirate captaincy is
@@ -137,7 +140,9 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
             [(Ware.GINSENG, 8, 3), (Ware.NUTMEG, 5, 3)], pirate_count=1
         )
         boarding_bonus = pirate_captain_boarding_bonus(state)
-        self.assertEqual(expected_accomplice_return(state, "p0"), Fraction(30) + pirate_part + boarding_bonus)
+        self.assertEqual(
+            expected_accomplice_return(state, beliefs, "p0"), Fraction(30) + pirate_part + boarding_bonus
+        )
 
     def test_pirate_valuation_never_projects_occupancy(self):
         # Unlike ware punts, the pirate boat gets no occupancy projection at
@@ -149,6 +154,7 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         state.punts[0].position = 6
         state.punts[0].status = PuntStatus.ON_ROUTE
         state.pirate_boat.captain.occupant = "p0"
+        beliefs = infer_beliefs(state, "p0")
 
         for movement_round_index in (0, 1, 2):
             with self.subTest(movement_round_index=movement_round_index):
@@ -156,7 +162,7 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
                 expected = pirate_expected_payout(
                     [(Ware.JADE, 6, 3 - movement_round_index)], pirate_count=1
                 )
-                self.assertEqual(expected_accomplice_return(state, "p0"), expected)
+                self.assertEqual(expected_accomplice_return(state, beliefs, "p0"), expected)
 
     def test_pirate_valuation_uses_current_count_when_two_are_aboard(self):
         # Two pirates actually aboard is a fact, not a projection -- the
@@ -167,18 +173,20 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         state.punts[0].status = PuntStatus.ON_ROUTE
         state.pirate_boat.captain.occupant = "p0"
         state.pirate_boat.second.occupant = "p1"
+        beliefs = infer_beliefs(state, "p0")
 
         expected = pirate_expected_payout([(Ware.JADE, 6, 3)], pirate_count=2)
-        self.assertEqual(expected_accomplice_return(state, "p0"), expected)
-        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p0"), expected)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p1"), expected)
 
     def test_last_turn_of_the_final_round_uses_actual_occupancy(self):
         state = self._rigged_state()
         state.movement_round_index = 2  # about to trigger the third dice throw -- 1 round left
         state.current_turn_player_id = "p2"  # last of 3 players in this round's rotation
+        beliefs = infer_beliefs(state, "p0")
         # No more placement chances remain -- p1's slot is valued alone.
         expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1, p_safe_if_caught=0)
-        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p1"), expected)
 
     def test_first_turn_of_the_final_round_also_uses_actual_occupancy(self):
         # Per the user: the "will fill up" assumption is dropped for the
@@ -188,15 +196,17 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         state = self._rigged_state()
         state.movement_round_index = 2
         state.current_turn_player_id = "p0"  # harbor master, first to act -- 3 turns still remain
+        beliefs = infer_beliefs(state, "p0")
         expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1, p_safe_if_caught=0)
-        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p1"), expected)
 
     def test_middle_turn_of_the_final_round_also_uses_actual_occupancy(self):
         state = self._rigged_state()
         state.movement_round_index = 2
         state.current_turn_player_id = "p1"  # 2nd of 3
+        beliefs = infer_beliefs(state, "p0")
         expected = ware_slot_expected_payout(Ware.GINSENG, 8, 1, accomplices_on_punt=1, p_safe_if_caught=0)
-        self.assertEqual(expected_accomplice_return(state, "p1"), expected)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p1"), expected)
 
     def test_pirate_valuation_is_unaffected_by_the_final_round_rule(self):
         # The final-accomplice-round exception is a ware-punt-only concept
@@ -205,31 +215,46 @@ class TestExpectedAccompliceReturn(unittest.TestCase):
         state = self._rigged_state()
         state.movement_round_index = 2
         state.current_turn_player_id = "p2"  # last turn of the round
+        beliefs = infer_beliefs(state, "p0")
         pirate_part = pirate_expected_payout(
             [(Ware.GINSENG, 8, 1), (Ware.NUTMEG, 5, 1)], pirate_count=1
         )
-        self.assertEqual(expected_accomplice_return(state, "p0"), Fraction(30) + pirate_part)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p0"), Fraction(30) + pirate_part)
 
     def test_dock_slot_matches_the_underlying_ev_function(self):
+        # _rigged_state makes p0 the pirate captain, and p0 (like every
+        # player here) holds no shares of anything -- so per the user's
+        # port-vs-shipyard rule, the captain isn't believed to hold *more*
+        # ginseng or nutmeg shares than the viewer (p0 itself, tied at 0),
+        # so a plundered catch on either on-route punt is assumed to go to
+        # the shipyard, not port: p_safe_if_caught=0 for both.
         state = self._rigged_state()
-        arrival_probs = [punt_port_probability(8, 3), 1, punt_port_probability(5, 3)]
+        beliefs = infer_beliefs(state, "p0")
+        arrival_probs = [
+            punt_port_probability(8, 3, p_safe_if_caught=0),
+            1,
+            punt_port_probability(5, 3, p_safe_if_caught=0),
+        ]
         expected = dock_slot_expected_payout("port", "A", arrival_probs)
-        self.assertEqual(expected_accomplice_return(state, "p2"), expected)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p2"), expected)
 
     def test_settled_phases_return_zero_even_with_slots_occupied(self):
         state = self._rigged_state()
+        beliefs = infer_beliefs(state, "p0")
         state.phase = Phase.PROFIT_DISTRIBUTION
-        self.assertEqual(expected_accomplice_return(state, "p1"), 0)
-        self.assertEqual(expected_accomplice_return(state, "p0"), 0)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p1"), 0)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p0"), 0)
 
     def test_shipwrecked_ware_slot_pays_nothing(self):
         state = self._rigged_state()
+        beliefs = infer_beliefs(state, "p0")
         state.punts[0].status = PuntStatus.IN_SHIPYARD
-        self.assertEqual(expected_accomplice_return(state, "p1"), 0)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p1"), 0)
 
     def test_player_with_no_slots_gets_zero(self):
         state = self._rigged_state()
-        self.assertEqual(expected_accomplice_return(state, "nobody"), 0)
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(expected_accomplice_return(state, beliefs, "nobody"), 0)
 
 
 class TestProjectFinalOccupancy(unittest.TestCase):
@@ -375,6 +400,44 @@ class TestPirateThreat(unittest.TestCase):
         state = _make_state()
         state.pirate_boat.second.occupant = "p1"
         self.assertEqual(pirate_threat(state), 0)
+
+
+class TestPPortIfCaughtOn13(unittest.TestCase):
+    def test_no_pirates_means_certain_port_arrival(self):
+        state = _make_state()
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(_p_port_if_caught_on_13(state, beliefs, Ware.JADE), 1)
+
+    def test_captain_with_more_shares_than_the_viewer_assumes_port(self):
+        # Per the user: sending it to port raises the ware's black-market
+        # value, so assume the captain does that when it's believed to
+        # benefit them more than the viewer.
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p1"
+        state.players[1].shares = [Share(ware=Ware.JADE, encumbered=False)]
+        beliefs = infer_beliefs(state, "p0", signals=[ShareSignal(player_id="p1", ware=Ware.JADE)])
+        self.assertEqual(_p_port_if_caught_on_13(state, beliefs, Ware.JADE), 1)
+
+    def test_captain_with_no_more_shares_than_the_viewer_assumes_shipyard(self):
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p1"
+        state.players[0].shares = [Share(ware=Ware.JADE, encumbered=False)]  # the viewer holds it
+        beliefs = infer_beliefs(state, "p0")
+        self.assertEqual(_p_port_if_caught_on_13(state, beliefs, Ware.JADE), 0)
+
+    def test_tied_share_counts_assume_shipyard(self):
+        # Not strictly *more* -- a tie doesn't count, per the user's wording.
+        state = _make_state()
+        state.pirate_boat.captain.occupant = "p1"
+        beliefs = infer_beliefs(state, "p0")  # both p0 and p1 hold 0 jade shares
+        self.assertEqual(_p_port_if_caught_on_13(state, beliefs, Ware.JADE), 0)
+
+    def test_lone_second_pirate_is_the_decider_when_no_captain_is_aboard(self):
+        state = _make_state()
+        state.pirate_boat.second.occupant = "p1"
+        state.players[1].shares = [Share(ware=Ware.JADE, encumbered=False)]
+        beliefs = infer_beliefs(state, "p0", signals=[ShareSignal(player_id="p1", ware=Ware.JADE)])
+        self.assertEqual(_p_port_if_caught_on_13(state, beliefs, Ware.JADE), 1)
 
 
 class TestPirateSlotEvIfTakenNow(unittest.TestCase):
@@ -527,14 +590,15 @@ class TestBoardingBonusOnlyAppliesToTheCaptain(unittest.TestCase):
         state.movement_round_index = 0
         state.pirate_boat.captain.occupant = "p0"
         state.pirate_boat.second.occupant = "p1"
+        beliefs = infer_beliefs(state, "p0")
 
         bonus = pirate_captain_boarding_bonus(state)
         self.assertGreater(bonus, 0)
 
         punts = [(Ware.GINSENG, 8, 3)]
         plain_pirate_part = pirate_expected_payout(punts, pirate_count=2)
-        self.assertEqual(expected_accomplice_return(state, "p0"), plain_pirate_part + bonus)
-        self.assertEqual(expected_accomplice_return(state, "p1"), plain_pirate_part)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p0"), plain_pirate_part + bonus)
+        self.assertEqual(expected_accomplice_return(state, beliefs, "p1"), plain_pirate_part)
 
 
 class TestExpectedAccompliceReturnAutoDerivesPirateThreat(unittest.TestCase):
@@ -547,10 +611,11 @@ class TestExpectedAccompliceReturnAutoDerivesPirateThreat(unittest.TestCase):
             AccompliceSlot(price=2),
             AccompliceSlot(price=3),
         ]
+        beliefs = infer_beliefs(state, "p0")
 
-        safe = expected_accomplice_return(state, "p1")
+        safe = expected_accomplice_return(state, beliefs, "p1")
         state.pirate_boat.captain.occupant = "p0"
-        endangered = expected_accomplice_return(state, "p1")
+        endangered = expected_accomplice_return(state, beliefs, "p1")
         self.assertLess(endangered, safe)
         self.assertEqual(endangered, ware_slot_expected_payout(Ware.GINSENG, 8, 3, 3, p_safe_if_caught=0))
 
@@ -561,10 +626,11 @@ class TestExpectedAccompliceReturnAutoDerivesPirateThreat(unittest.TestCase):
         state.punts[0].status = PuntStatus.ON_ROUTE
         state.punts[0].ware_slots = [AccompliceSlot(price=1, occupant="p1"), AccompliceSlot(price=2), AccompliceSlot(price=3)]
         state.pirate_boat.captain.occupant = "p0"  # real threat exists...
+        beliefs = infer_beliefs(state, "p0")
 
         # ...but an explicit override is still honored, e.g. for a
         # counterfactual "what if I ignore pirate risk" comparison.
-        forced_safe = expected_accomplice_return(state, "p1", p_safe_if_caught=1)
+        forced_safe = expected_accomplice_return(state, beliefs, "p1", p_safe_if_caught=1)
         self.assertEqual(forced_safe, ware_slot_expected_payout(Ware.GINSENG, 8, 3, 3, p_safe_if_caught=1))
 
 
