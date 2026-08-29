@@ -1,0 +1,273 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Manilla Roadmap</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Serif:wght@500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --bg: #EDE9DE;
+    --surface: #F7F4EB;
+    --surface-2: #E4DFCF;
+    --ink: #1E2A2E;
+    --ink-soft: #5B6A64;
+    --ink-faint: #8A9490;
+    --accent: #2E7A4C;
+    --accent-2: #9C6B3E;
+    --rule: #D3CCB8;
+    --rule-strong: #B9B096;
+    --code-bg: #1E2A2E;
+    --code-fg: #EDE9DE;
+    --warn: #A94B3C;
+    --done-bg: #E3EEE4; --done-fg: #22633F; --done-rule: #B9D6BE;
+    --partial-bg: #F3EAD8; --partial-fg: #8A5A22; --partial-rule: #E2C79A;
+    --todo-bg: #ECE7DB; --todo-fg: #6B655A; --todo-rule: #D6CFBD;
+    --shadow: 0 1px 2px rgba(30,42,46,0.06), 0 8px 24px rgba(30,42,46,0.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12191A; --surface: #1A2422; --surface-2: #202C29;
+      --ink: #E9E5D8; --ink-soft: #A3ADA6; --ink-faint: #6E7973;
+      --accent: #5FBE86; --accent-2: #C99A63;
+      --rule: #2B3733; --rule-strong: #3B4A44;
+      --code-bg: #0B1110; --code-fg: #E9E5D8; --warn: #E08B78;
+      --done-bg: #1B3327; --done-fg: #7FD9A6; --done-rule: #2C5A41;
+      --partial-bg: #35291A; --partial-fg: #E0B679; --partial-rule: #5A4527;
+      --todo-bg: #232B29; --todo-fg: #93998F; --todo-rule: #33403B;
+      --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.3);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12191A; --surface: #1A2422; --surface-2: #202C29;
+    --ink: #E9E5D8; --ink-soft: #A3ADA6; --ink-faint: #6E7973;
+    --accent: #5FBE86; --accent-2: #C99A63;
+    --rule: #2B3733; --rule-strong: #3B4A44;
+    --code-bg: #0B1110; --code-fg: #E9E5D8; --warn: #E08B78;
+    --done-bg: #1B3327; --done-fg: #7FD9A6; --done-rule: #2C5A41;
+    --partial-bg: #35291A; --partial-fg: #E0B679; --partial-rule: #5A4527;
+    --todo-bg: #232B29; --todo-fg: #93998F; --todo-rule: #33403B;
+    --shadow: 0 1px 2px rgba(0,0,0,0.3), 0 8px 24px rgba(0,0,0,0.3);
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, sans-serif;
+    font-size: 16px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+  .page { max-width: 780px; margin: 0 auto; padding: 56px 24px 96px; }
+
+  header.masthead { border-bottom: 3px solid var(--ink); padding-bottom: 22px; margin-bottom: 30px; }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace; font-size: 12.5px; letter-spacing: 0.09em;
+    text-transform: uppercase; color: var(--ink-soft);
+    display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 10px;
+  }
+  h1.title {
+    font-family: "IBM Plex Serif", Georgia, serif; font-weight: 700;
+    font-size: clamp(2.1rem, 5vw, 2.9rem); letter-spacing: -0.01em; margin: 0 0 8px; text-wrap: balance;
+  }
+  .dek { color: var(--ink-soft); font-size: 1.05rem; max-width: 62ch; margin: 0; }
+
+  .legend { display: flex; gap: 10px; flex-wrap: wrap; margin: 22px 0 40px; }
+  .chip {
+    font-family: "IBM Plex Mono", monospace; font-size: 0.72rem; letter-spacing: 0.05em;
+    text-transform: uppercase; padding: 4px 10px; border-radius: 20px; border: 1px solid transparent;
+    display: inline-flex; align-items: center; gap: 6px;
+  }
+  .chip.done { background: var(--done-bg); color: var(--done-fg); border-color: var(--done-rule); }
+  .chip.partial { background: var(--partial-bg); color: var(--partial-fg); border-color: var(--partial-rule); }
+  .chip.todo { background: var(--todo-bg); color: var(--todo-fg); border-color: var(--todo-rule); }
+
+  .milestone {
+    display: grid;
+    grid-template-columns: 64px 1fr;
+    gap: 4px 20px;
+    padding: 26px 0;
+    border-top: 1px solid var(--rule);
+  }
+  .milestone:first-of-type { border-top: none; }
+  .m-num {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    padding-top: 3px;
+  }
+  .m-num .n { display: block; font-size: 1.7rem; color: var(--ink-faint); line-height: 1; margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+  .m-body { min-width: 0; }
+  .m-head { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 6px; }
+  .m-head h2 { font-family: "IBM Plex Serif", Georgia, serif; font-weight: 600; font-size: 1.28rem; margin: 0; }
+  .m-body p { margin: 0 0 8px; color: var(--ink); }
+  .m-body p.sub { color: var(--ink-soft); font-size: 0.93rem; }
+  .m-body ul { margin: 8px 0 0; padding-left: 1.2em; }
+  .m-body li { margin: 3px 0; font-size: 0.93rem; color: var(--ink-soft); }
+  .m-body code { font-family: "IBM Plex Mono", monospace; font-size: 0.87em; background: var(--surface-2); border: 1px solid var(--rule); border-radius: 4px; padding: 0.05em 0.35em; color: var(--ink); }
+
+  .next-up {
+    margin-top: 44px;
+    background: var(--surface);
+    border: 1px solid var(--rule-strong);
+    border-left: 4px solid var(--accent);
+    border-radius: 0 10px 10px 0;
+    padding: 20px 24px;
+    box-shadow: var(--shadow);
+  }
+  .next-up h2 {
+    font-family: "IBM Plex Serif", Georgia, serif; font-size: 1.2rem; margin: 0 0 8px;
+  }
+  .next-up ol { margin: 8px 0 0; padding-left: 1.3em; }
+  .next-up li { margin: 6px 0; }
+
+  footer {
+    margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--rule);
+    color: var(--ink-faint); font-size: 0.85rem;
+    display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <header class="masthead">
+    <div class="eyebrow">
+      <span>Build roadmap</span>
+      <span>as of 2026-08-29</span>
+    </div>
+    <h1 class="title">Manilla Roadmap</h1>
+    <p class="dek">Eight milestones from a blank folder to a competing fleet of AI traders. Six are now shipped, including a heuristic REV agent that can bid, buy, load, and place on its own — what's left is comparing it at scale and training a learned share-buying policy on top of it. The headless self-play runner both of those need now exists too.</p>
+  </header>
+
+  <div class="legend">
+    <span class="chip done">● Shipped</span>
+    <span class="chip partial">◐ Partial</span>
+    <span class="chip todo">○ Not started</span>
+  </div>
+
+  <div class="milestone">
+    <div class="m-num"><span class="n">0</span>scaffold</div>
+    <div class="m-body">
+      <div class="m-head"><h2>Project scaffolding</h2><span class="chip done">● Shipped</span></div>
+      <p class="sub"><code>manilla/engine</code>, <code>manilla/ui</code>, <code>tests/</code>, <code>main.py</code> — stdlib only, no external dependencies.</p>
+    </div>
+  </div>
+
+  <div class="milestone">
+    <div class="m-num"><span class="n">1</span>data</div>
+    <div class="m-body">
+      <div class="m-head"><h2>Core data model</h2><span class="chip done">● Shipped</span></div>
+      <p><code>manilla/engine/models.py</code> — <code>GameState</code>, <code>Player</code>, <code>Punt</code>, <code>Ware</code>, <code>BlackMarket</code>, every accomplice-space shape, JSON round-trip, 15 unit tests.</p>
+    </div>
+  </div>
+
+  <div class="milestone">
+    <div class="m-num"><span class="n">2</span>board</div>
+    <div class="m-body">
+      <div class="m-head"><h2>Board-setup interface</h2><span class="chip done">● Shipped</span></div>
+      <p>Tkinter canvas rendering of sea lanes, port/shipyard, pirate boat, pilot island, insurance, black market, and a live player panel. Started as a free-form sandbox for constructing test positions.</p>
+    </div>
+  </div>
+
+  <div class="milestone">
+    <div class="m-num"><span class="n">3</span>play</div>
+    <div class="m-body">
+      <div class="m-head"><h2>Full playable voyage loop</h2><span class="chip done">● Shipped</span></div>
+      <p>Not in the original plan as its own milestone — this is what milestones 4–7 of the <em>original</em> rules-engine plan collapsed into once real gameplay requests started arriving. Covers the entire rulebook flow for a live voyage:</p>
+      <ul>
+        <li>Locked new-game setup, bid/pass auction, harbor-master share purchase, ware loading &amp; punt placement</li>
+        <li>Turn-based accomplice placement with automatic payment and slot-priority rules across every space type</li>
+        <li>Automatic dice rolls, arrivals, shipwrecks, pirate boarding &amp; plunder, pilot movement</li>
+        <li>Full profit distribution, black-market rises, a credit/blind-passenger system so cash never goes negative</li>
+        <li>End-of-game ranked standings with correct share-unencumbering-under-scarcity math</li>
+        <li>Random-policy computer players for any or all seats, chained through a full unattended game</li>
+      </ul>
+      <p class="sub">See <em>Manilla Handoff</em> for the full feature list and the exact numbers in play.</p>
+    </div>
+  </div>
+
+  <div class="milestone">
+    <div class="m-num"><span class="n">4</span>ev-math</div>
+    <div class="m-body">
+      <div class="m-head"><h2>Probability / EV layer</h2><span class="chip done">● Shipped</span></div>
+      <p>Exact (non-simulated) probability and expected-coin-return math for every dice-driven placement decision, split across two modules, both pure functions with no Tkinter import and full <code>Fraction</code>-exact arithmetic:</p>
+      <ul>
+        <li><code>manilla/engine/probability.py</code> — <code>movement_distribution(rounds)</code> (exact pip-sum distribution over N die rolls, plus a per-ware wrapper) and <code>position_outcomes(start, rounds_remaining)</code>, resolving a punt's exact <code>arrived</code> / <code>caught_on_13</code> / <code>shipwrecked</code> probabilities, honoring the mid-voyage overshoot-arrival rule.</li>
+        <li><code>manilla/engine/expected_value.py</code> — <code>ware_slot_ev</code> (accounts for how many accomplices split the cargo profit and an optional pirate-safety estimate), <code>pirate_slot_ev</code> (sums plunder EV across every loaded punt — plunder is automatic once a punt is caught, so no opponent-decision uncertainty applies), and <code>dock_slot_ev</code> for port/shipyard (an exact Poisson-binomial fill-count distribution, since a slot fills in strict arrival order and so only depends on <em>how many</em> punts arrive, not which one).</li>
+      </ul>
+      <p class="sub">32 new unit tests (53 total). Pirate presence on a punt caught on 13 is the one place an opponent decision enters: every EV function that touches it takes <code>p_safe_if_caught</code> as an explicit parameter rather than assuming a value.</p>
+    </div>
+  </div>
+
+  <div class="milestone">
+    <div class="m-num"><span class="n">5</span>regression</div>
+    <div class="m-body">
+      <div class="m-head"><h2>Learned share-buying policy</h2><span class="chip partial">◐ Partial</span></div>
+      <p>The regression model itself is still on paper, but its prerequisite — a genuinely headless, Tkinter-free game engine — shipped 2026-08-28: <code>manilla/engine/selfplay.py</code> reimplements <code>BoardSetupApp</code>'s entire voyage loop (auction, share buying, load/place, accomplice rounds, dice, pirates, pilots, profit distribution, standings) as plain synchronous functions over a <code>GameState</code>, seeded end-to-end via an explicit <code>random.Random</code> for reproducible games and batches (<code>run_voyage</code>, <code>run_game</code>, <code>run_self_play_games</code>). It's a parallel reimplementation of the same rules, not a wrapper around <code>BoardSetupApp</code> — see <em>Manilla Handoff</em>'s architecture-debt note for why, and for what that does and doesn't cover.</p>
+      <ul>
+        <li>Speed reality check, measured: a random-policy game is nearly free (20 full 4-player games in 0.03s), but a REV-policy voyage costs roughly 7 seconds, dominated by <code>best_punt_setup</code>'s ~76-candidate enumeration. Confirms the "light rollout" mitigation discussed earlier — a cheaper policy driving simulated future turns — will matter once actual bulk training-data generation starts; the runner itself doesn't need to change for that, only which policy it's told to run.</li>
+        <li><strong>Scope narrowed 2026-08-29: the regression covers share buying only — <em>not</em> <code>first_mover_value</code>, and not harbor-master bidding as a whole.</strong> The bidding decision keeps its existing hand-tuned components; only the share-buying half moves to a learned model. The per-seat positional advantage that <code>first_mover_value</code> is trying to price is answered directly by <code>harbor_master_profit.jsonl</code>'s plain per-offset means (see milestone 7) — with only 4–5 seat offsets there's no dimensionality problem a regression would solve, and the measured shape is a step (harbor master clearly ahead, the rest near-flat) rather than the smooth per-position slope a fitted coefficient would imply.</li>
+        <li>Also staying off the learned path: pirate placement and ware/dock EV keep the exact analytical treatment (<code>expected_value.py</code>'s dice-probability math) — learning those from noisy self-play samples would only add approximation error on top of numbers that are already exact.</li>
+        <li>Regression, not classification, even for skewed/high-variance targets: share-buying value is modeled as a plain expected-value target, consistent with how REV already treats every other decision — no risk-sensitivity term planned.</li>
+        <li>Given the project's zero-dependency convention, default plan is a hand-rolled regression (e.g. closed-form linear/ridge regression) rather than a real ML library, unless that's revisited later.</li>
+        <li>Feature design is still open — raw numeric state features (share counts per ware, cash, positions, etc.) fed directly to the model, no need to canonicalize or enumerate the state space first.</li>
+        <li>Training-data collection itself shipped 2026-08-28: <code>manilla/engine/selfplay_data.py</code>'s <code>record_self_play_games</code> hooks into <code>run_voyage</code>/<code>run_game</code>'s new optional <code>on_loaded</code>/<code>on_voyage_end</code> callbacks and appends <code>bid_buy_training.jsonl</code> — one row per voyage: shares currently owned per ware and which 2 of the 3 loaded wares got the most favorable (highest, i.e. shortest-remaining-distance) start position, labeled with that <em>game's</em> eventual final black-market standings once the game actually ends (every voyage in a game shares the one label its game converged to). JSON Lines, not a single JSON array or a SQL database — appendable per-game without rewriting the file, crash-safe mid-run, streams without loading everything into memory, and matches the project's existing zero-dependency <code>json</code>-only convention.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="milestone">
+    <div class="m-num"><span class="n">6</span>ecr-agent</div>
+    <div class="m-body">
+      <div class="m-head"><h2>Heuristic ECR agent</h2><span class="chip done">● Shipped</span></div>
+      <p>An action-selection policy — formalized as <strong>Relative Expected Value (REV)</strong> — that scores a candidate action by its ripple effect across every rival's wealth, not just the acting player's own. Fully wired into live bot decisions now, selectable per seat (Human / Computer (random) / Computer (REV)) via a single seat-type selector, with a one-click "Simulate (all REV computers)" to watch four of them play a whole voyage unattended:</p>
+      <ul>
+        <li><code>manilla/engine/beliefs.py</code> — infers hidden opponent share identities from public signals (a harbor-master purchase, a punt started 4+ spaces forward), pooling everything still unconfirmed and averaging it uniformly, weighted by black-market price.</li>
+        <li><code>manilla/engine/wealth.py</code> — <code>wealth_estimate</code> (every opponent's figure padded +15 pesos, a defensive margin against what beliefs can't see), <code>action_impact</code> (simulates a candidate action on a cloned board and reports its ripple across every current rival), plus lookahead scorers for pilot moves and the pirate captain's free mid-voyage boarding.</li>
+        <li><code>manilla/engine/harbor_master.py</code> — the auction/bidding decision, three components summed: share-buying value (coupled to the harbor master's own punt-loading choice — a ware's chance of rising this voyage is 0 unless that choice actually loads it), punt-setup value (exact dice probabilities, direct cargo payout plus indirect black-market-rise effect), and first-mover value (a per-voyage random cost coefficient with a worst-case "nearest active bidder" assumption). Bidding also prices two liquidity risks that don't stack — 3 pesos if a bid would drop cash below 10, or, if it applies, 15 pesos per encumbered share at real risk of the game ending before it can be freed.</li>
+        <li><code>manilla/engine/policy.py</code> — <code>choose_accomplice_action</code> picks the best port/shipyard/ware/pirate/pilot/insurance placement each turn, scored on the same REV scale as the bidding decision.</li>
+      </ul>
+      <p class="sub">Verified end-to-end with a headless Tkinter test that runs a full 4-bot REV voyage through the real UI, not just the engine's own unit tests. Hardened through several rounds of user-reported bugs and corrections since shipping — a stalled auction and an EV-blind accomplice policy (both traced to the same missing REV baseline), a mis-clickable auction turn, a seat-picker trap that silently left "computer" seats un-set, a profit notification missing pirate/insurance payouts, an occupancy projection that stayed optimistic too long into the final round, a displayed pirate EV missing its captain-only boarding bonus, a dock-slot EV that ignored the pirate captain's real port-vs-shipyard choice, and — found 2026-08-28 while auditing pilot behavior — the live pilot-phase decision itself never actually consulted <code>wealth.py</code>'s <code>best_pilot_move</code> lookahead at all: <code>_bot_small_pilot_move</code>/<code>_bot_large_pilot_move</code> picked randomly regardless of policy, so REV bots were piloting exactly like random ones. Fixed with a new <code>best_pilot_move_spec</code>/<code>pilot_move_specs</code> pair in <code>wealth.py</code> (reports the winning move as plain <code>(punt_id, delta)</code> data instead of an opaque mutator, so the live game can replay it through its own dock-slot-aware move method), wired into both <code>BoardSetupApp</code> and <code>selfplay.py</code>. Verified against two hand-built scenarios: pulling two punts back from space 13 so a pirate-pilot can still catch a roll of 1 (staying at 13 is a guaranteed safe overshoot next roll — 0% catch chance), and pushing a solely-held punt forward to 13 to escape a rival's pirates. 319 tests across the whole suite.</p>
+    </div>
+  </div>
+
+  <div class="milestone">
+    <div class="m-num"><span class="n">7</span>tourney</div>
+    <div class="m-body">
+      <div class="m-head"><h2>4-bot tournament &amp; analysis</h2><span class="chip partial">◐ Partial</span></div>
+      <p>The headless batch runner this milestone needed now exists (<code>manilla.engine.selfplay.run_self_play_games</code>, shipped 2026-08-28 alongside milestone 5's prerequisite work) — many games, no Tk window, deterministic from a seed. What's still missing is actually running it at scale and comparing REV against random statistically (win rate, standings distribution) rather than just observing "it completes." The old UI-driven "Simulate" button still exists for watching one game unattended, but batch analysis should go through <code>run_self_play_games</code> instead.</p>
+      <p class="sub"><code>manilla/engine/selfplay_data.py</code>'s <code>record_self_play_games</code> (shipped 2026-08-28, see milestone 5) also writes <code>harbor_master_profit.jsonl</code> — one row per voyage, keyed by seat offset from the harbor master. Deliberately <em>not</em> a regression target: the per-position advantage is a marginal question about a distribution, and a plain mean per offset answers it. This is the number <code>first_mover_value</code>'s hand-picked 0.5–2.0 coefficient is currently guessing at.</p>
+      <p class="sub"><strong>Corrected 2026-08-29 — an earlier reading of this data was measuring the wrong thing.</strong> The cash snapshot was originally taken at the very top of the voyage, <em>before</em> the auction, so each figure was accomplice earnings <em>minus</em> the winning bid and share purchase. That's what produced the earlier claim that the harbor master came out net negative: the office cost 16–25 pesos per voyage and all of it was being charged against offset 0. The snapshot now happens after the auction and share purchase are both settled (<code>run_voyage</code>'s <code>cash_after_setup</code>), isolating what a seat's accomplices actually earned, and a regression test pins it there. Keeping the price out is what makes the data usable at all for milestone 5: a model trained on a figure its own bids had already moved would be fitting a circular target.</p>
+      <p class="sub">Measured on the corrected data — random policy over 2409 voyages, REV over 29 (5 games, so REV's figures are indicative only, roughly ±1.5):</p>
+      <ul>
+        <li><strong>Random:</strong> offset 0 <code>+8.96</code>, then 1 <code>+5.86</code>, 2 <code>+5.55</code>, 3 <code>+6.41</code> — the harbor master is clearly ahead (~8 standard errors), but the remaining seats are flat and not even monotonic.</li>
+        <li><strong>REV:</strong> offset 0 <code>+18.00</code>, then 1 <code>+9.93</code>, 2 <code>+4.28</code>, 3 <code>+5.76</code> — roughly double the harbor-master edge, and a real gradient across the first three seats rather than random's flat tail. The best evidence yet that REV is genuinely exploiting turn order and not just completing games.</li>
+        <li>Offset 3 ticks back up under both policies. Well inside noise at these sample sizes, but if it survives at scale a last-mover effect would be a real finding worth understanding.</li>
+        <li>Caveat on reading these as "the value of the office": this file measures <em>cash</em> only. The share the harbor master buys (an asset that may appreciate) and their control over punt positioning (which steers the black market) never touch this delta, so it understates what the role is worth.</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="next-up">
+    <h2>Recommended next step</h2>
+    <p>The shared prerequisite for milestones 5 and 7 — a headless self-play runner — shipped 2026-08-28 (<code>manilla/engine/selfplay.py</code>). Two directions are open from here:</p>
+    <ol>
+      <li><strong>Milestone 7, batch comparison.</strong> Run <code>run_self_play_games</code> at scale (random-policy is cheap; REV is ~7s/voyage) and log/compare outcomes — a real statistical answer on whether, and by how much, REV plays better than random.</li>
+      <li><strong>Milestone 5, regression policy.</strong> Snapshot <code>(state, eventual outcome)</code> pairs across self-play games and fit a regression model for <strong>share buying only</strong> — <code>first_mover_value</code> and the rest of the bidding decision stay heuristic (see milestone 5). Given REV's measured ~6.5s per voyage, generating a useful volume of REV-driven training games will likely need the "light rollout" policy swap discussed above before it's practical at scale.</li>
+    </ol>
+  </div>
+
+  <footer>
+    <span>Manilla — build roadmap</span>
+    <span>Companion doc: <em>Manilla Handoff</em></span>
+  </footer>
+
+</div>
+</body>
+</html>
