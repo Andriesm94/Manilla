@@ -1,10 +1,23 @@
 """End-to-end check that the "rev" policy can actually drive a live game
-through `BoardSetupApp`, not just pass its own engine-layer unit tests.
+through `BoardSetupApp`'s real dialog chain, not just pass its own
+engine-layer unit tests or `manilla.engine.selfplay`'s independent
+reimplementation of the same rules (see `tests/test_selfplay.py`, which
+now covers REV correctness -- money invariants, standings, multiple seeds
+and player counts -- far more cheaply since it never touches Tkinter at
+all). What only *this* file can catch is a bug in the UI's own turn-
+advancement/dialog-chain plumbing itself (`_advance_turn`,
+`self.after()` scheduling, the auction dialog's bot loop, ...) --
+`selfplay.py` is a hand-written parallel implementation of the same
+rules, so it provides zero assurance that `board_setup.py`'s actual code
+is wired correctly. Several real bugs (a stalled auction, a turn
+hijacked by a slow bot's click-through window) were only ever caught this
+way, so this file is intentionally kept even though it's slower and
+Tkinter-based -- see the project's Handoff doc.
 
-Uses the project's established headless-Tkinter pattern: build a real
-(never-shown) BoardSetupApp, kick off the auction, and pump the Tk event
-loop so every self.after()-scheduled bot decision fires, exactly as it
-would in a real, running window.
+Uses the project's established headless-Tkinter pattern: build a real,
+withdrawn (never-shown) BoardSetupApp, kick off the auction, and pump the
+Tk event loop so every self.after()-scheduled bot decision fires, exactly
+as it would in a real, running window.
 """
 
 import os
@@ -35,6 +48,7 @@ class TestRevPolicyDrivesALiveGame(unittest.TestCase):
         state.game_setup_confirmed = True
 
         self.root = tk.Tk()
+        self.root.withdraw()  # never actually show a window during tests
         self.app = BoardSetupApp(self.root, state)
         self.app.pack(fill=tk.BOTH, expand=True)
         self.root.update_idletasks()
