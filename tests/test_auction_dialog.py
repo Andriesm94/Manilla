@@ -39,6 +39,7 @@ class TestAuctionDialogDisablesControlsDuringABotsTurn(unittest.TestCase):
         state.game_setup_confirmed = True
 
         self.root = tk.Tk()
+        self.root.withdraw()  # never actually show a window during tests
         self.app = BoardSetupApp(self.root, state)
         self.app.pack(fill=tk.BOTH, expand=True)
         self.root.update_idletasks()
