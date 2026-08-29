@@ -529,6 +529,48 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         me.cash = next_bid + preferred_share_price + 5
         self.assertEqual(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0), next_bid)
 
+    def test_four_at_risk_shares_pass_outright_even_when_flush_with_cash(self):
+        # Per the user: a ware already at black-market 20, a player holding
+        # 4 encumbered shares of it, and 64 pesos cash -> that player
+        # passes automatically, at any bid level including the very first.
+        # 4 at-risk shares cost 4 x SHARE_REPAY_AMOUNT = 60 imaginary pesos
+        # of liquidity on top of the bid itself, which no realistic
+        # harbor-master value clears.
+        #
+        # The 64 cash is deliberately generous: it's enough that the
+        # *other* (below-10) penalty wouldn't fire even after paying the
+        # bid and buying the preferred share, so the pass is attributable
+        # purely to the at-risk penalty rather than to being cash-poor.
+        state = _make_state()
+        state.black_market.values[Ware.GINSENG] = 20
+        me = state.player_by_id("p0")
+        me.shares = [Share(ware=Ware.GINSENG, encumbered=True) for _ in range(4)]
+        me.cash = 64
+        beliefs = infer_beliefs(state, "p0")
+        order = ["p0", "p1", "p2"]
+        active = ["p0", "p1", "p2"]
+        context = harbor_master_bid_context(state, beliefs, "p0")
+        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+
+        self.assertEqual(at_risk_encumbered_share_count(state, "p0", context.wares_loaded), 4)
+        penalty = SHARE_REPAY_AMOUNT * 4
+
+        # Opening the auction: the cheapest bid this player could ever make.
+        opening_bid = 1
+        # Rich enough that the below-10 penalty is not what's driving this.
+        self.assertGreaterEqual(me.cash - opening_bid - context.preferred_share_price, 10)
+        # Without the at-risk penalty they'd happily raise; with it, they can't.
+        self.assertGreater(value, opening_bid)
+        self.assertLess(value, opening_bid + penalty)
+
+        # Passes at the opening bid, and (cost only climbing from there) at
+        # every higher one too.
+        for highest in (0, 1, 2, 5, 10, 25):
+            self.assertIsNone(
+                decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0),
+                f"should pass with a highest bid of {highest}",
+            )
+
     def test_precomputed_bid_context_gives_the_same_answer(self):
         # The whole point of precomputed_bid_context is to skip
         # recomputing harbor_master_bid_context on every bid -- confirm
