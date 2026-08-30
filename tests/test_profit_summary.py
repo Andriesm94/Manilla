@@ -20,7 +20,7 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manilla.ui.board_setup import BoardSetupApp
-from manilla.engine.models import Punt, PuntStatus, Ware
+from manilla.engine.models import INSURANCE_PAYMENT, INSURANCE_SHIPYARD_COST, Punt, PuntStatus, Ware
 
 
 class ProfitSummaryTestCase(unittest.TestCase):
@@ -105,6 +105,68 @@ class TestVoyageProfitSummaryReflectsNetChange(ProfitSummaryTestCase):
         self.assertIn(f"{players[0].color}: -4", message)
         self.assertIn(f"{players[1].color}: +24", message)
         self.assertIn(f"{players[2].color}: +6", message)
+
+
+class TestVoyageProfitSummaryInsurance(ProfitSummaryTestCase):
+    def test_insurance_holder_nets_plus_four_when_exactly_one_punt_wrecks(self):
+        """Per the user: take insurance, have one punt land in the
+        shipyard, and the profit-distribution dialog should show +4 for
+        that player. The two halves land at opposite ends of the voyage --
+        the INSURANCE_PAYMENT bonus is paid immediately at placement time,
+        the repair cost only at distribution -- and the summary catches
+        both purely because it diffs against `_cash_at_round_start`."""
+        players = self.state.players
+        harbor_master = players[0]
+        loaded = [Ware.NUTMEG, Ware.SILK, Ware.GINSENG]
+        positions = {Ware.NUTMEG: 3, Ware.SILK: 3, Ware.GINSENG: 3}
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo"):
+            self.app._apply_load_and_place(harbor_master, loaded, positions)  # snapshots cash here
+
+        # The harbor master holds the turn right after load-and-place, so
+        # they're the one who takes insurance (+INSURANCE_PAYMENT now).
+        cash_before = harbor_master.cash
+        self.app._place_or_remove_insurance()
+        self.assertEqual(self.state.insurance.occupant, harbor_master.id)
+        self.assertEqual(harbor_master.cash, cash_before + INSURANCE_PAYMENT)
+
+        # Exactly one punt wrecks. No shipyard-slot accomplice is placed on
+        # it, so the wreck's only cash consequence is the repair bill.
+        punt = self.state.punts[0]
+        punt.status = PuntStatus.IN_SHIPYARD
+        punt.dock_slot = "A"
+        self.state.movement_round_index = 3
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
+            self.app._distribute_profits([], then=None)
+            message = showinfo.call_args[0][1]
+
+        # +10 collected at placement, -6 repaid for the single wreck.
+        self.assertEqual(INSURANCE_PAYMENT - INSURANCE_SHIPYARD_COST[1], 4)
+        self.assertIn(f"{harbor_master.color}: +4", message)
+
+    def test_a_wreck_with_no_insurance_holder_costs_nobody_anything(self):
+        # The +4 above is the insurance holder's net, not something the
+        # wreck itself pays out -- with the insurance space empty, the same
+        # single wreck moves nobody's cash at all.
+        players = self.state.players
+        harbor_master = players[0]
+        loaded = [Ware.NUTMEG, Ware.SILK, Ware.GINSENG]
+        positions = {Ware.NUTMEG: 3, Ware.SILK: 3, Ware.GINSENG: 3}
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo"):
+            self.app._apply_load_and_place(harbor_master, loaded, positions)
+
+        self.assertIsNone(self.state.insurance.occupant)
+        punt = self.state.punts[0]
+        punt.status = PuntStatus.IN_SHIPYARD
+        punt.dock_slot = "A"
+        self.state.movement_round_index = 3
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
+            self.app._distribute_profits([], then=None)
+            message = showinfo.call_args[0][1]
+
+        for player in players:
+            self.assertIn(f"{player.color}: +0", message)
 
 
 if __name__ == "__main__":
