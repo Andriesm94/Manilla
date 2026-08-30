@@ -28,8 +28,9 @@ Run the tests with:
 python -m unittest discover -s tests
 ```
 
-319 tests covering the data model, the probability/EV/REV engine, the headless
-self-play engine, and UI-integration tests that drive the real Tkinter app.
+354 tests covering the data model, the probability/EV/REV engine, the headless
+self-play engine, the learned share-buying model, and UI-integration tests that
+drive the real Tkinter app.
 
 ## What's here
 
@@ -59,6 +60,12 @@ self-play engine, and UI-integration tests that drive the real Tkinter app.
   lookahead scorers for pilot moves.
 - **`manilla/engine/harbor_master.py`** — the auction decision: what the office is
   worth, which share to buy, how to load and position the punts, and how high to bid.
+- **`manilla/engine/seat_value.py`** — what each seat in the turn rotation is
+  actually worth, measured from self-play rather than assumed. Replaced a random
+  0.5–2.0 coefficient that priced a later seat as linear in distance; the
+  measurement says it's a step, not a slope — the harbor master earns ~10.6 pesos
+  over the next seat, and every seat behind that is within about a peso of the
+  others (the last seat even beats the second-to-last).
 - **`manilla/engine/policy.py`** — `choose_accomplice_action`, the top-level "pick
   the best placement this turn" entry point.
 
@@ -76,8 +83,28 @@ self-play engine, and UI-integration tests that drive the real Tkinter app.
   ~0.03s); REV costs roughly 6.5s per voyage, dominated by the punt-setup search.
 - **`manilla/engine/selfplay_data.py`** — writes two JSON-Lines datasets to `data/`
   (gitignored) while games run: per-seat accomplice earnings, and per-voyage board
-  features labeled with the game's eventual final black-market standings. Intended
-  to train a share-buying model; see the roadmap.
+  features labeled with the game's eventual final black-market standings. Every row
+  carries a `schema_version`, so a reader can tell which code produced it — twice a
+  dataset had to be discarded because that wasn't recorded and the rows couldn't be
+  told apart afterwards.
+- **`scripts/run_selfplay_until.py`** — runs games until a wall-clock deadline,
+  flushing each finished game to disk and surviving individual crashes, for long
+  unattended batches.
+
+### The learned model
+
+- **`manilla/engine/share_model.py`** — a ridge regression (normal equations,
+  no external library) predicting each ware's *final* black-market level, so the
+  harbor master can buy whichever share is worth most net of its price. Trained on
+  self-play rows, split by game rather than by row — every voyage in a game shares
+  one label, so a row-wise split would score well by recognising the game.
+
+  Worth knowing how it got here: built on share counts and the favoured punts
+  alone, it lost to the one-line heuristic "just buy the favoured ware" (0.412
+  against 0.430). Adding each ware's *current* market level — which bounds the
+  final one from below — took it to 0.606. The shipped coefficients are trained on
+  random-policy games and are provisional; retrain on REV rows once a run has
+  recorded them.
 
 ## A note on the architecture
 
