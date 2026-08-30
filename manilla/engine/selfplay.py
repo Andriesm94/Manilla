@@ -57,6 +57,7 @@ from manilla.engine.models import (
     Share,
     Ware,
 )
+from manilla.engine.seat_value import seat_profit_means
 from manilla.engine.policy import AccompliceChoice, choose_accomplice_action
 from manilla.engine.wealth import best_pilot_move_spec
 
@@ -462,7 +463,11 @@ def _run_auction(state: GameState, rng: random.Random) -> None:
     if not players:
         return
 
-    first_mover_costs = {p.id: rng.uniform(0.5, 2.0) for p in players}
+    # Measured mean earnings of each seat in the rotation, replacing the
+    # old per-voyage random first-mover coefficient -- fixed for the whole
+    # game so bidding doesn't drift between voyages. See
+    # manilla.engine.seat_value.
+    seat_means = seat_profit_means(len(players))
     start_player = next((p for p in players if p.is_harbor_master), players[0])
     start_idx = players.index(start_player)
     order = players[start_idx:] + players[:start_idx]
@@ -488,7 +493,7 @@ def _run_auction(state: GameState, rng: random.Random) -> None:
                 [p.id for p in order],
                 [p.id for p in active],
                 highest_bid,
-                first_mover_costs.get(cp.id, 1.0),
+                seat_means,
                 precomputed_bid_context=rev_bid_context_cache[cp.id],
             )
             if candidate is not None and candidate <= affordable:

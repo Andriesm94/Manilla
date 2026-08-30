@@ -43,6 +43,7 @@ from manilla.engine.harbor_master import (
     decide_harbor_master_bid,
     harbor_master_bid_context,
 )
+from manilla.engine.seat_value import seat_profit_means
 from manilla.engine.policy import choose_accomplice_action
 from manilla.engine.wealth import best_pilot_move_spec, best_pirate_boarding_move, pirate_slot_ev_if_taken_now
 
@@ -112,12 +113,13 @@ class BoardSetupApp(tk.Frame):
         self._click_regions: List[ClickRegion] = []
         self._player_widgets: dict = {}
         self._round_placements = 0  # accomplice placements so far in the current round (session-only, not saved)
-        # Per-voyage random first-mover cost coefficient per player, for
-        # the "rev" policy's harbor-master bidding decision (manilla.
-        # engine.harbor_master.first_mover_value) -- regenerated once at
-        # the start of every voyage's auction (_show_auction_dialog), not
-        # saved (it's a policy-internal detail, not real game state).
-        self._first_mover_costs: dict = {}
+        # Measured mean earnings per seat in the turn rotation, for the
+        # "rev" policy's harbor-master bidding decision (manilla.engine.
+        # harbor_master.first_mover_value). Replaces a per-voyage random
+        # cost coefficient; recomputed once per game (at each auction, in
+        # case the player count changed) rather than per voyage, and not
+        # saved -- it's a policy-internal detail, not real game state.
+        self._seat_profit_means: tuple = seat_profit_means(len(self.state_obj.players))
         # Each player's cash at the moment this voyage's accomplice-
         # placement phase began (_apply_load_and_place) -- the baseline
         # the round-end "Voyage profit summary" diffs against, so it
@@ -1886,11 +1888,12 @@ class BoardSetupApp(tk.Frame):
         if not players:
             return
 
-        # Fresh per-voyage first-mover cost coefficient for every player
-        # (manilla.engine.harbor_master.first_mover_value) -- regenerated
-        # once here, at the start of each voyage's auction, and reused for
-        # every bidding decision made during it.
-        self._first_mover_costs = {p.id: random.uniform(0.5, 2.0) for p in players}
+        # Seat-value table for this game's player count (manilla.engine.
+        # harbor_master.first_mover_value), reused for every bidding
+        # decision. Refreshed here rather than only at construction so a
+        # game started with a different player count picks up the right
+        # table.
+        self._seat_profit_means = seat_profit_means(len(players))
 
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title(f"Voyage {self.state_obj.voyage_number} - Harbor Master Auction")
@@ -1990,7 +1993,7 @@ class BoardSetupApp(tk.Frame):
                     [p.id for p in order],
                     [p.id for p in auction["active"]],
                     auction["highest_bid"],
-                    self._first_mover_costs.get(cp.id, 1.0),
+                    self._seat_profit_means,
                     precomputed_bid_context=rev_bid_context_cache[cp.id],
                 )
                 if bid_amount is not None and bid_amount <= affordable:

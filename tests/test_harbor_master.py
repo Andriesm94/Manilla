@@ -344,44 +344,75 @@ class TestBestPuntSetup(unittest.TestCase):
         self.assertGreaterEqual(best_rise, worse_rise)
 
 
+# A deliberately uneven stand-in seat table: distinct, non-linear values so
+# a test can tell "looked up seat N" apart from "multiplied by N".
+SEATS = (20.0, 6.0, 4.0, 5.0)
+
+
 class TestFirstMoverValue(unittest.TestCase):
     def test_zero_when_no_one_else_is_still_bidding(self):
         order = ["p0", "p1", "p2"]
-        self.assertEqual(first_mover_value(order, "p0", ["p0"], 1.0), 0)
+        self.assertEqual(first_mover_value(order, "p0", ["p0"], SEATS), 0)
 
-    def test_uses_the_nearest_active_bidder_after_me(self):
-        order = ["p0", "p1", "p2"]
-        # p1 is immediately after p0 and still active -- if p0 passes,
-        # assume p1 wins; p0 would then sit 2 spots behind p1 (rotation
-        # restarts at p1: p1(0), p2(1), p0(2)).
-        value = first_mover_value(order, "p0", ["p0", "p1", "p2"], 1.0)
-        self.assertEqual(value, Fraction(1) * 2 * 3)
-
-    def test_skips_inactive_players_to_find_the_nearest_active_one(self):
+    def test_assumes_the_worst_remaining_rival_takes_the_office(self):
         order = ["p0", "p1", "p2", "p3"]
-        # p1 has already passed; p2 is the nearest still-active bidder.
-        value = first_mover_value(order, "p0", ["p0", "p2", "p3"], 1.0)
-        # rotation restarts at p2: p2(0), p3(1), p0(2), p1(3) -- p0 is 2 behind.
-        self.assertEqual(value, Fraction(1) * 2 * 3)
+        # Every rival is a possible winner. If p1 wins p0 lands on seat 3
+        # (worth 5), if p2 wins seat 2 (worth 4), if p3 wins seat 1
+        # (worth 6). The worst landing spot is seat 2, so that's the one
+        # priced -- NOT p1, who merely happens to sit nearest behind.
+        value = first_mover_value(order, "p0", ["p0", "p1", "p2", "p3"], SEATS)
+        self.assertEqual(value, Fraction(20) - Fraction(4))
 
-    def test_wraps_around_the_turn_order(self):
+    def test_falls_back_to_the_next_worst_when_that_rival_has_passed(self):
+        order = ["p0", "p1", "p2", "p3"]
+        # p2 -- the rival who would strand p0 on the worst seat -- is out,
+        # so the worst remaining case is p1 winning and p0 landing on
+        # seat 3 (worth 5), not seat 2.
+        value = first_mover_value(order, "p0", ["p0", "p1", "p3"], SEATS)
+        self.assertEqual(value, Fraction(20) - Fraction(5))
+
+    def test_single_remaining_rival_prices_only_that_rivals_seat(self):
         order = ["p0", "p1", "p2"]
-        # Only p0 and p2 remain active; p2 comes before p0 in raw order but
-        # wraps around to be the "nearest after" p0.
-        value = first_mover_value(order, "p0", ["p0", "p2"], 1.0)
-        # rotation restarts at p2: p2(0), p0(1) -- p0 is 1 behind.
-        self.assertEqual(value, Fraction(1) * 1 * 3)
+        # Only p2 left: if they win, the rotation restarts at p2, putting
+        # p0 one spot behind (seat 1, worth 6).
+        value = first_mover_value(order, "p0", ["p0", "p2"], SEATS)
+        self.assertEqual(value, Fraction(20) - Fraction(6))
 
-    def test_scales_with_the_cost_coefficient(self):
-        order = ["p0", "p1"]
-        low = first_mover_value(order, "p0", ["p0", "p1"], 0.5)
-        high = first_mover_value(order, "p0", ["p0", "p1"], 2.0)
-        self.assertEqual(high, low * 4)
+    def test_reads_the_seat_table_rather_than_scaling_with_distance(self):
+        """Seat 3 is worth *more* than seat 2 in the real measurement, so
+        the worst case is the middle seat, not the furthest one -- a
+        formula linear in distance would get this backwards."""
+        order = ["p0", "p1", "p2", "p3"]
+        worst_is_seat_two = first_mover_value(order, "p0", ["p0", "p2"], SEATS)
+        only_seat_three = first_mover_value(order, "p0", ["p0", "p1"], SEATS)
+        self.assertEqual(worst_is_seat_two, Fraction(20) - Fraction(4))
+        self.assertEqual(only_seat_three, Fraction(20) - Fraction(5))
+        self.assertGreater(worst_is_seat_two, only_seat_three)
 
-    def test_accepts_a_float_coefficient_exactly(self):
+    def test_never_below_the_nearest_bidder_only_assumption(self):
+        """Regression against the old heuristic: taking the maximum over
+        every remaining rival can only ever price the office at or above
+        what assuming the nearest one gave."""
+        order = ["p0", "p1", "p2", "p3"]
+        for active in (
+            ["p0", "p1", "p2", "p3"],
+            ["p0", "p2", "p3"],
+            ["p0", "p1", "p3"],
+            ["p0", "p3"],
+        ):
+            with self.subTest(active=active):
+                nearest = next(
+                    order[(order.index("p0") + off) % len(order)]
+                    for off in range(1, len(order))
+                    if order[(order.index("p0") + off) % len(order)] in active
+                )
+                nearest_only = first_mover_value(order, "p0", ["p0", nearest], SEATS)
+                self.assertGreaterEqual(first_mover_value(order, "p0", active, SEATS), nearest_only)
+
+    def test_accepts_float_seat_values_exactly(self):
         order = ["p0", "p1"]
-        value = first_mover_value(order, "p0", ["p0", "p1"], 0.5)
-        self.assertEqual(value, Fraction(1, 2) * 1 * 3)
+        value = first_mover_value(order, "p0", ["p0", "p1"], (10.5, 4.25))
+        self.assertEqual(value, Fraction(25, 4))
 
 
 class TestHarborMasterValue(unittest.TestCase):
@@ -395,10 +426,10 @@ class TestHarborMasterValue(unittest.TestCase):
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
 
-        total = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        total = harbor_master_value(state, beliefs, "p0", order, active, SEATS)
 
         static_part = harbor_master_static_value(state, beliefs, "p0")
-        mover_part = first_mover_value(order, "p0", active, 1.0)
+        mover_part = first_mover_value(order, "p0", active, SEATS)
         self.assertEqual(total, static_part + mover_part)
 
 
@@ -408,13 +439,13 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         beliefs = infer_beliefs(state, "p0")
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
-        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        value = harbor_master_value(state, beliefs, "p0", order, active, SEATS)
 
         # A highest bid comfortably below the computed value should be
         # worth raising by exactly one step.
         highest = int(value) - 5
         self.assertEqual(
-            decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0),
+            decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, SEATS),
             highest + 1,
         )
 
@@ -423,30 +454,39 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         beliefs = infer_beliefs(state, "p0")
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
-        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        value = harbor_master_value(state, beliefs, "p0", order, active, SEATS)
 
         # A highest bid already at (or past) the value should not be
         # raised further -- winning at that price wouldn't be worth it.
         highest = int(value) + 100
-        self.assertIsNone(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0))
+        self.assertIsNone(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, SEATS))
 
-    def test_recalibrates_as_active_bidders_shrink(self):
-        # Same board, same highest bid -- but fewer active bidders after
-        # someone passes should change the first-mover component (a
-        # different, possibly farther, nearest active bidder), and so can
-        # change the decision.
+    def test_recalibrates_only_when_the_worst_case_rival_drops_out(self):
+        # Same board, same highest bid, but a shrinking field. Since the
+        # first-mover component is a maximum over every remaining rival,
+        # it moves only when the rival defining that maximum passes --
+        # losing any other bidder leaves the worst case untouched. p2 is
+        # the worst case here (it would strand p0 on the lowest-earning
+        # seat), so p1 passing changes nothing and p2 passing does.
         state = _make_state()
         beliefs = infer_beliefs(state, "p0")
         order = ["p0", "p1", "p2", "p3"]
         highest = 5
 
-        full_field = decide_harbor_master_bid(state, beliefs, "p0", order, ["p0", "p1", "p2", "p3"], highest, 2.0)
-        after_p1_passes = decide_harbor_master_bid(state, beliefs, "p0", order, ["p0", "p2", "p3"], highest, 2.0)
-        value_full = harbor_master_value(state, beliefs, "p0", order, ["p0", "p1", "p2", "p3"], 2.0)
-        value_after_pass = harbor_master_value(state, beliefs, "p0", order, ["p0", "p2", "p3"], 2.0)
-        self.assertNotEqual(value_full, value_after_pass)
-        self.assertEqual(full_field, highest + 1 if value_full > highest + 1 else None)
-        self.assertEqual(after_p1_passes, highest + 1 if value_after_pass > highest + 1 else None)
+        def value(active):
+            return harbor_master_value(state, beliefs, "p0", order, active, SEATS)
+
+        full = value(["p0", "p1", "p2", "p3"])
+        self.assertEqual(value(["p0", "p2", "p3"]), full)  # p1 passed -- worst case unchanged
+        self.assertLess(value(["p0", "p1", "p3"]), full)  # p2 passed -- worst case relaxes
+
+        # ...and the bid decision follows that value either way.
+        for active in (["p0", "p1", "p2", "p3"], ["p0", "p1", "p3"]):
+            with self.subTest(active=active):
+                expected = highest + 1 if value(active) > highest + 1 else None
+                self.assertEqual(
+                    decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, SEATS), expected
+                )
 
     def test_encumbrance_penalty_can_flip_a_clearing_bid_to_a_pass(self):
         # Per the user: if paying the next bid, *and* then buying the
@@ -463,7 +503,7 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         beliefs = infer_beliefs(state, "p0")
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
-        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        value = harbor_master_value(state, beliefs, "p0", order, active, SEATS)
         preferred_share_price = harbor_master_bid_context(state, beliefs, "p0").preferred_share_price
 
         # A next_bid that clears the raw value (value > next_bid) but
@@ -477,12 +517,12 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         # Winning would leave only 5 pesos after ALSO buying the
         # preferred share -- below 10.
         me.cash = next_bid + preferred_share_price + 5
-        self.assertIsNone(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0))
+        self.assertIsNone(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, SEATS))
 
         # Winning would comfortably clear 10 pesos even after that purchase.
         me.cash = next_bid + preferred_share_price + 50
         self.assertEqual(
-            decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0), next_bid
+            decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, SEATS), next_bid
         )
 
     def test_encumbrance_penalty_matches_share_repay_minus_loan(self):
@@ -491,7 +531,7 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         beliefs = infer_beliefs(state, "p0")
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
-        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        value = harbor_master_value(state, beliefs, "p0", order, active, SEATS)
         preferred_share_price = harbor_master_bid_context(state, beliefs, "p0").preferred_share_price
         highest = int(value) - 2
         next_bid = highest + 1
@@ -499,7 +539,7 @@ class TestDecideHarborMasterBid(unittest.TestCase):
 
         expected_cost = next_bid + (SHARE_REPAY_AMOUNT - SHARE_LOAN_AMOUNT)
         expected = next_bid if value > expected_cost else None
-        self.assertEqual(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0), expected)
+        self.assertEqual(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, SEATS), expected)
 
     def test_at_risk_penalty_replaces_rather_than_stacks_with_below_ten(self):
         # Per the user, the two liquidity penalties don't stack: an
@@ -515,7 +555,7 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         beliefs = infer_beliefs(state, "p0")
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
-        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        value = harbor_master_value(state, beliefs, "p0", order, active, SEATS)
         preferred_share_price = harbor_master_bid_context(state, beliefs, "p0").preferred_share_price
 
         next_bid = math.floor(value) - 16
@@ -527,7 +567,7 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         # Also below 10 after buying the preferred share -- both penalty
         # conditions are true here, but only the bigger one should apply.
         me.cash = next_bid + preferred_share_price + 5
-        self.assertEqual(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0), next_bid)
+        self.assertEqual(decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, SEATS), next_bid)
 
     def test_four_at_risk_shares_pass_outright_even_when_flush_with_cash(self):
         # Per the user: a ware already at black-market 20, a player holding
@@ -550,7 +590,7 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
         context = harbor_master_bid_context(state, beliefs, "p0")
-        value = harbor_master_value(state, beliefs, "p0", order, active, 1.0)
+        value = harbor_master_value(state, beliefs, "p0", order, active, SEATS)
 
         self.assertEqual(at_risk_encumbered_share_count(state, "p0", context.wares_loaded), 4)
         penalty = SHARE_REPAY_AMOUNT * 4
@@ -567,7 +607,7 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         # every higher one too.
         for highest in (0, 1, 2, 5, 10, 25):
             self.assertIsNone(
-                decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, 1.0),
+                decide_harbor_master_bid(state, beliefs, "p0", order, active, highest, SEATS),
                 f"should pass with a highest bid of {highest}",
             )
 
@@ -581,9 +621,9 @@ class TestDecideHarborMasterBid(unittest.TestCase):
         active = ["p0", "p1", "p2"]
         context = harbor_master_bid_context(state, beliefs, "p0")
 
-        fresh = decide_harbor_master_bid(state, beliefs, "p0", order, active, 3, 1.5)
+        fresh = decide_harbor_master_bid(state, beliefs, "p0", order, active, 3, SEATS)
         cached = decide_harbor_master_bid(
-            state, beliefs, "p0", order, active, 3, 1.5, precomputed_bid_context=context
+            state, beliefs, "p0", order, active, 3, SEATS, precomputed_bid_context=context
         )
         self.assertEqual(fresh, cached)
 
@@ -707,8 +747,8 @@ class TestHarborMasterStaticValue(unittest.TestCase):
         order = ["p0", "p1", "p2"]
         active = ["p0", "p1", "p2"]
         static_value = harbor_master_static_value(state, beliefs, "p0")
-        mover = first_mover_value(order, "p0", active, 1.0)
-        self.assertEqual(harbor_master_value(state, beliefs, "p0", order, active, 1.0), static_value + mover)
+        mover = first_mover_value(order, "p0", active, SEATS)
+        self.assertEqual(harbor_master_value(state, beliefs, "p0", order, active, SEATS), static_value + mover)
 
 
 if __name__ == "__main__":

@@ -26,9 +26,13 @@ bid" breaks into three separately-heuristic-driven value components:
    `wealth.py` accounts for on its own, since `wealth_estimate` only ever
    reads the black market's current, static values.
 3. `first_mover_value` -- the value of placing accomplices before
-   everyone else this voyage, using a per-player-per-voyage random cost
-   coefficient the caller generates and supplies (deliberately not this
-   module's job -- see `first_mover_value`'s docstring).
+   everyone else this voyage, priced from the *measured* mean earnings of
+   each seat in the turn rotation (`manilla.engine.seat_value`) rather
+   than the hand-picked random coefficient this used to take. The caller
+   supplies the seat table, computed once per game. Valued as a worst
+   case over the field: whichever still-active rival would leave `my_id`
+   in the lowest-earning seat is assumed to take the office if `my_id`
+   passes.
 
 `harbor_master_value` sums all three into what winning the auction is
 worth to `my_id` this voyage; compare that against how much more bidding
@@ -43,7 +47,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 from manilla.engine.beliefs import ShareBeliefs, assumed_share_count
 from manilla.engine.expected_value import Numeric, punt_port_probability
@@ -58,6 +62,7 @@ from manilla.engine.models import (
     SHARE_REPAY_AMOUNT,
     Ware,
 )
+from manilla.engine.seat_value import seat_advantage
 from manilla.engine.wealth import action_impact, identify_rivals
 
 
@@ -301,55 +306,67 @@ def _spots_behind(turn_order: List[str], harbor_master_id: str, player_id: str) 
     return (p_idx - hm_idx) % len(turn_order)
 
 
-def _nearest_active_bidder_after(turn_order: List[str], my_id: str, active_bidder_ids: List[str]) -> Optional[str]:
-    """The first player, scanning forward from just after `my_id` in
-    `turn_order` (wrapping around), who is still in `active_bidder_ids`.
-    `None` if no one else is still bidding."""
+def _rival_bidders(turn_order: List[str], my_id: str, active_bidder_ids: List[str]) -> List[str]:
+    """Everyone other than `my_id` who is still bidding and has a place in
+    `turn_order` -- i.e. every player who could still take the office if
+    `my_id` drops out."""
     if my_id not in turn_order:
-        return None
-    start = turn_order.index(my_id)
-    n = len(turn_order)
-    for offset in range(1, n):
-        candidate = turn_order[(start + offset) % n]
-        if candidate != my_id and candidate in active_bidder_ids:
-            return candidate
-    return None
+        return []
+    return [pid for pid in turn_order if pid != my_id and pid in active_bidder_ids]
 
 
 def first_mover_value(
     turn_order: List[str],
     my_id: str,
     active_bidder_ids: List[str],
-    late_cost_per_spot: Numeric,
+    seat_means: Sequence[Numeric],
 ) -> Fraction:
     """The coin-equivalent value, to `my_id`, of winning the harbor-master
     auction specifically from the first-mover advantage of placing
     accomplices before everyone else this voyage.
 
-    `late_cost_per_spot` is a per-voyage, per-player random cost
-    coefficient (the user: "a random floating point cost ... between 0.5
-    and 2") representing the disadvantage of placing one turn-order spot
-    later than the harbor master -- generating and persisting it for a
-    voyage is the *caller's* job, not this function's, since it needs to
-    stay stable across every decision made during that voyage, not be
-    redrawn per call.
+    `seat_means` is the mean per-voyage accomplice earnings of each seat,
+    indexed by offset from the harbor master -- see
+    `manilla.engine.seat_value`, which measures it from self-play rather
+    than assuming it. Computing it is the *caller's* job, once per game,
+    so it stays fixed across every decision made during that game.
 
-    Per the user's worst-case heuristic: if `my_id` passes instead of
-    winning, assume the nearest still-active bidder after them in
-    `turn_order` (wrapping around) becomes harbor master instead --
-    that's close to the worst possible outcome for `my_id`'s own position,
-    since the placement rotation then restarts right behind them. The
-    value is that assumed outcome's cost: `late_cost_per_spot` times how
-    many spots behind the new harbor master `my_id` would sit, times 3
-    (one hit per accomplice placed, three per player per voyage). 0 if no
-    one else is still bidding (passing wouldn't cost this component
-    anything -- there's no one left to hand the title to).
+    Worst-case over the remaining field, per the user: if `my_id` passes
+    instead of winning, assume whichever still-active bidder would leave
+    them in the *worst* seat takes the office. Every remaining rival is
+    considered as a possible winner, `my_id`'s resulting offset behind
+    each is priced through `seat_advantage`, and the largest of those is
+    the value -- the most `my_id` can lose by dropping out, given who is
+    actually still in the auction. 0 if no one else is still bidding
+    (passing wouldn't cost this component anything -- there's no one left
+    to hand the title to).
+
+    Note this is a maximum over *seat value*, not over seat distance, so
+    which rival counts as worst depends on the measured table rather than
+    on who sits furthest back. With the current figures the worst landing
+    spot is offset 2 (the lowest-earning seat), not offset 3 -- so a rival
+    two spots ahead is more threatening than the one directly behind, and
+    if that rival has already passed the worst case falls to whoever is
+    left. An earlier version assumed the nearest active bidder after
+    `my_id` always won, which understated this whenever a further-away
+    rival would have been worse.
+
+    This replaced a `late_cost_per_spot * spots * 3` formula built on a
+    random 0.5-2.0 coefficient. Two things changed with it: the cost is no
+    longer assumed linear in seat distance (the measurement shows a step
+    at the harbor master and near-flatness behind it), and the `* 3` is
+    gone -- a seat's measured mean already covers the whole voyage, all
+    three accomplices included, so multiplying would double-count.
     """
-    nearest = _nearest_active_bidder_after(turn_order, my_id, active_bidder_ids)
-    if nearest is None:
+    rivals = _rival_bidders(turn_order, my_id, active_bidder_ids)
+    if not rivals:
         return Fraction(0)
-    spots = _spots_behind(turn_order, nearest, my_id)
-    return Fraction(late_cost_per_spot) * spots * 3
+    return max(
+        Fraction(
+            seat_advantage(seat_means, _spots_behind(turn_order, rival, my_id))
+        ).limit_denominator(10**6)
+        for rival in rivals
+    )
 
 
 def _neutral_punt_setup(state: GameState) -> Tuple[List[Ware], Dict[Ware, int]]:
@@ -500,7 +517,7 @@ def harbor_master_value(
     my_id: str,
     turn_order: List[str],
     active_bidder_ids: List[str],
-    late_cost_per_spot: Numeric,
+    seat_means: Sequence[Numeric],
     p_safe_if_caught: Optional[Numeric] = None,
 ) -> Fraction:
     """Total value, to `my_id`, of winning the harbor-master auction this
@@ -510,7 +527,7 @@ def harbor_master_value(
     how much, to bid.
     """
     static_value = harbor_master_static_value(state, beliefs, my_id, p_safe_if_caught)
-    return static_value + first_mover_value(turn_order, my_id, active_bidder_ids, late_cost_per_spot)
+    return static_value + first_mover_value(turn_order, my_id, active_bidder_ids, seat_means)
 
 
 def decide_harbor_master_bid(
@@ -520,7 +537,7 @@ def decide_harbor_master_bid(
     turn_order: List[str],
     active_bidder_ids: List[str],
     current_highest_bid: int,
-    late_cost_per_spot: Numeric,
+    seat_means: Sequence[Numeric],
     p_safe_if_caught: Optional[Numeric] = None,
     precomputed_bid_context: Optional[HarborMasterBidContext] = None,
 ) -> Optional[int]:
@@ -573,7 +590,7 @@ def decide_harbor_master_bid(
         if precomputed_bid_context is None
         else precomputed_bid_context
     )
-    value = context.static_value + first_mover_value(turn_order, my_id, active_bidder_ids, late_cost_per_spot)
+    value = context.static_value + first_mover_value(turn_order, my_id, active_bidder_ids, seat_means)
     next_bid = current_highest_bid + 1
 
     my_player = state.player_by_id(my_id)
