@@ -59,6 +59,22 @@ from manilla.engine.models import GameState, Player, Ware
 from manilla.engine.selfplay import GameResult, new_bot_game, run_game
 
 
+# Bumped whenever a row's shape or the *meaning* of a recorded number
+# changes, so a reader can tell which code produced a line instead of
+# guessing from the fields present. Stamped on every row.
+#
+#   1  original rows (implicit -- these carry no schema_version at all):
+#      earnings measured from the top of the voyage, so net of the auction
+#      and share purchase; no black_market on training rows.
+#   2  earnings measured from after setup is paid for (cash_after_setup),
+#      and training rows carry the current black_market levels.
+#
+# Twice now a dataset had to be set aside because nothing in it recorded
+# this, and the rows couldn't be told apart after the fact -- see
+# data/seat_value_measurement_old_bidding/README.txt.
+SCHEMA_VERSION = 2
+
+
 @dataclass
 class HarborMasterProfitRow:
     game_id: str
@@ -66,6 +82,7 @@ class HarborMasterProfitRow:
     player_count: int
     policy: str
     pesos_by_seat_offset: Dict[int, int]
+    schema_version: int = SCHEMA_VERSION
 
 
 @dataclass
@@ -78,6 +95,12 @@ class BidBuyTrainingRow:
     favored_wares: Set[str]  # the 2 of 3 loaded wares with the most-advanced start position -- an
     # unordered pair, not a sequence; serialized as a sorted list (see record_self_play_games) since
     # JSON has no set type
+    black_market: Dict[str, int]  # ware.value -> current level, at the moment this voyage loaded.
+    # Added 2026-08-30 after the first share-buying model underperformed a one-line heuristic: the
+    # final level is bounded below by the current one (a ware at 20 needs one more rise; a ware at 0
+    # needs four), so without this the model was guessing at the single most predictive input it
+    # could have had. Rows written before that date don't carry it.
+    schema_version: int = SCHEMA_VERSION
     final_black_market: Optional[Dict[str, int]] = None  # filled in once the game ends -- the "solution"
 
 
@@ -143,6 +166,7 @@ def record_self_play_games(
                         policy=policy,
                         shares_in_play={w.value: state.shares_owned(w) for w in Ware},
                         favored_wares=_favored_wares(state),
+                        black_market={w.value: v for w, v in state.black_market.values.items()},
                     )
                 )
 
