@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manilla.engine.seat_value import (
+    MIN_SCHEMA_VERSION,
     MEASURED_SEAT_PROFIT,
     measure_seat_profit_means,
     seat_advantage,
@@ -70,16 +71,18 @@ class TestMeasureSeatProfitMeans(unittest.TestCase):
     def _write(self, path, rows):
         path.write_text("\n".join(json.dumps(r) for r in rows), encoding="utf-8")
 
+    def _row(self, offsets, policy="rev", player_count=2, schema_version=MIN_SCHEMA_VERSION):
+        return {
+            "policy": policy,
+            "player_count": player_count,
+            "schema_version": schema_version,
+            "pesos_by_seat_offset": offsets,
+        }
+
     def test_averages_each_offset_across_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp, "profit.jsonl")
-            self._write(
-                path,
-                [
-                    {"policy": "rev", "player_count": 2, "pesos_by_seat_offset": {"0": 10, "1": 2}},
-                    {"policy": "rev", "player_count": 2, "pesos_by_seat_offset": {"0": 20, "1": 4}},
-                ],
-            )
+            self._write(path, [self._row({"0": 10, "1": 2}), self._row({"0": 20, "1": 4})])
             self.assertEqual(measure_seat_profit_means(path, player_count=2), (15.0, 3.0))
 
     def test_ignores_rows_from_another_policy_or_player_count(self):
@@ -88,18 +91,42 @@ class TestMeasureSeatProfitMeans(unittest.TestCase):
             self._write(
                 path,
                 [
-                    {"policy": "rev", "player_count": 2, "pesos_by_seat_offset": {"0": 10, "1": 2}},
-                    {"policy": "random", "player_count": 2, "pesos_by_seat_offset": {"0": 999, "1": 999}},
-                    {"policy": "rev", "player_count": 4, "pesos_by_seat_offset": {"0": 999, "1": 999}},
+                    self._row({"0": 10, "1": 2}),
+                    self._row({"0": 999, "1": 999}, policy="random"),
+                    self._row({"0": 999, "1": 999}, player_count=4),
                 ],
             )
             self.assertEqual(measure_seat_profit_means(path, player_count=2), (10.0, 2.0))
+
+    def test_refuses_rows_that_counted_an_encumbrance_loan_as_income(self):
+        """Pre-v3 rows are inflated, most for the harbor master. Averaging
+        them into a fresh measurement would bias it upward silently, so
+        they're skipped rather than mixed in."""
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "profit.jsonl")
+            self._write(
+                path,
+                [
+                    self._row({"0": 10, "1": 2}),
+                    self._row({"0": 999, "1": 999}, schema_version=MIN_SCHEMA_VERSION - 1),
+                ],
+            )
+            self.assertEqual(measure_seat_profit_means(path, player_count=2), (10.0, 2.0))
+
+    def test_refuses_rows_with_no_schema_version_at_all(self):
+        # The very first rows carry no stamp; they're v1 by definition.
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp, "profit.jsonl")
+            unstamped = self._row({"0": 10, "1": 2})
+            del unstamped["schema_version"]
+            self._write(path, [unstamped])
+            self.assertIsNone(measure_seat_profit_means(path, player_count=2))
 
     def test_none_when_the_file_is_missing_or_has_no_matching_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
             self.assertIsNone(measure_seat_profit_means(Path(tmp, "nope.jsonl")))
             path = Path(tmp, "profit.jsonl")
-            self._write(path, [{"policy": "random", "player_count": 4, "pesos_by_seat_offset": {"0": 1}}])
+            self._write(path, [self._row({"0": 1}, policy="random", player_count=4)])
             self.assertIsNone(measure_seat_profit_means(path, policy="rev", player_count=4))
 
 
