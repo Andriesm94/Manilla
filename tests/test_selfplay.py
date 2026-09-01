@@ -14,8 +14,9 @@ job of verifying the real UI wiring.
 import random
 import unittest
 
-from manilla.engine.models import GameState, Phase, Share, Ware
+from manilla.engine.models import SHARE_LOAN_AMOUNT, GameState, Phase, Share, Ware
 from manilla.engine.selfplay import (
+    VoyageBaseline,
     compute_fortune,
     new_bot_game,
     run_game,
@@ -45,8 +46,8 @@ class TestVoyageEndCashSnapshotExcludesTheCostOfTheOffice(unittest.TestCase):
                     seen["at_load"] = {p.id: p.cash for p in s.players}
                     seen["hm"] = hm.id
 
-                def on_voyage_end(s, hm, cash_after_setup):
-                    seen["snapshot"] = dict(cash_after_setup)
+                def on_voyage_end(s, hm, baseline):
+                    seen["snapshot"] = dict(baseline.cash)
 
                 run_voyage(state, random.Random(seed), on_loaded=on_loaded, on_voyage_end=on_voyage_end)
 
@@ -63,6 +64,52 @@ class TestVoyageEndCashSnapshotExcludesTheCostOfTheOffice(unittest.TestCase):
                 for player_id, started_with in cash_at_voyage_start.items():
                     if player_id != hm:
                         self.assertEqual(seen["snapshot"][player_id], started_with)
+
+
+class TestVoyageBaselineNetsOutEncumbrance(unittest.TestCase):
+    """Encumbering mid-voyage raises cash by SHARE_LOAN_AMOUNT in exchange
+    for a debt, so counting it as earnings credits a player for taking a
+    loan -- and flatters the harbor master most, since paying for the
+    auction and the share is what makes anyone run short."""
+
+    def _player(self, cash, shares):
+        state = GameState.new_default_game(["A", "B", "C"])
+        player = state.players[0]
+        player.cash = cash
+        player.shares = list(shares)
+        return state, player
+
+    def test_a_loan_is_not_earnings(self):
+        state, player = self._player(10, [Share(ware=Ware.JADE)])
+        baseline = VoyageBaseline.snapshot(state)
+
+        player.shares[0].encumbered = True  # exactly what _settle_payment does
+        player.cash += SHARE_LOAN_AMOUNT
+
+        self.assertEqual(baseline.earnings(player), 0)
+
+    def test_real_payouts_still_count_alongside_a_loan(self):
+        state, player = self._player(10, [Share(ware=Ware.JADE)])
+        baseline = VoyageBaseline.snapshot(state)
+
+        player.shares[0].encumbered = True
+        player.cash += SHARE_LOAN_AMOUNT
+        player.cash += 7  # a genuine payout on top
+
+        self.assertEqual(baseline.earnings(player), 7)
+
+    def test_shares_already_encumbered_before_the_voyage_are_ignored(self):
+        state, player = self._player(10, [Share(ware=Ware.JADE, encumbered=True)])
+        baseline = VoyageBaseline.snapshot(state)
+
+        player.cash += 9
+        self.assertEqual(baseline.earnings(player), 9)
+
+    def test_plain_cash_movement_is_unaffected(self):
+        state, player = self._player(30, [])
+        baseline = VoyageBaseline.snapshot(state)
+        player.cash -= 4
+        self.assertEqual(baseline.earnings(player), -4)
 
 
 class TestRandomPolicySelfPlay(unittest.TestCase):

@@ -68,11 +68,15 @@ from manilla.engine.selfplay import GameResult, new_bot_game, run_game
 #      and share purchase; no black_market on training rows.
 #   2  earnings measured from after setup is paid for (cash_after_setup),
 #      and training rows carry the current black_market levels.
+#   3  earnings net out mid-voyage encumbrance: taking a SHARE_LOAN_AMOUNT
+#      loan against a share used to read as income, inflating whoever ran
+#      short. Only harbor_master_profit rows change meaning; bid_buy rows
+#      are identical to v2 in content.
 #
 # Twice now a dataset had to be set aside because nothing in it recorded
 # this, and the rows couldn't be told apart after the fact -- see
 # data/seat_value_measurement_old_bidding/README.txt.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 
 @dataclass
@@ -170,11 +174,9 @@ def record_self_play_games(
                     )
                 )
 
-            def on_voyage_end(
-                state: GameState, harbor_master: Player, cash_after_setup: Dict[str, int]
-            ) -> None:
+            def on_voyage_end(state: GameState, harbor_master: Player, baseline) -> None:
                 offsets = _seat_offsets(state, harbor_master)
-                pesos_by_offset = {offsets[p.id]: p.cash - cash_after_setup[p.id] for p in state.players}
+                pesos_by_offset = {offsets[p.id]: baseline.earnings(p) for p in state.players}
                 profit_rows.append(
                     HarborMasterProfitRow(
                         game_id=game_id,

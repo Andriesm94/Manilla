@@ -129,6 +129,10 @@ class BoardSetupApp(tk.Frame):
         # insurance's upfront payment, profit distribution, ...) rather
         # than an itemized list that has to remember to include each one.
         self._cash_at_round_start: dict = {}
+        # Encumbered-share count per player at the same moment, so the
+        # profit summary can net out mid-voyage loans -- see
+        # _distribute_profits.
+        self._encumbered_at_round_start: dict = {}
 
         self._build_toolbar()
         self._build_body()
@@ -931,8 +935,16 @@ class BoardSetupApp(tk.Frame):
         (_cash_at_round_start, set in _apply_load_and_place), so it
         reflects every cash movement all voyage -- placement costs, the
         insurance bonus, every payout here -- not just what this function
-        itself pays out."""
+        itself pays out.
+
+        Encumbering a share mid-voyage is then subtracted back out. It
+        raises cash by SHARE_LOAN_AMOUNT, so on a pure cash diff a player
+        who ran short and pledged a share looks 12 PESOS better off per
+        share -- but that's a loan against something they still owe
+        SHARE_REPAY_AMOUNT to get back, not profit. Counting it as income
+        would flatter exactly the players who had the worst voyage."""
         cash_before = self._cash_at_round_start
+        encumbered_before = self._encumbered_at_round_start
         self._pay_port_shipyard_rewards()
         self._pay_ware_profits()
         self._pay_insurance_cost()
@@ -944,7 +956,14 @@ class BoardSetupApp(tk.Frame):
         if self.state_obj.players:
             lines = []
             for player in self.state_obj.players:
-                delta = player.cash - cash_before.get(player.id, player.cash)
+                borrowed = max(
+                    0, len(player.encumbered_shares) - encumbered_before.get(player.id, 0)
+                )
+                delta = (
+                    player.cash
+                    - cash_before.get(player.id, player.cash)
+                    - SHARE_LOAN_AMOUNT * borrowed
+                )
                 lines.append(f"{player.color}: {'+' if delta >= 0 else ''}{delta}")
             message += "\n\nVoyage profit summary:\n" + "\n".join(lines)
         if risen:
@@ -2160,6 +2179,9 @@ class BoardSetupApp(tk.Frame):
         self.state_obj.current_turn_player_id = harbor_master.id
         self._round_placements = 0
         self._cash_at_round_start = {p.id: p.cash for p in self.state_obj.players}
+        self._encumbered_at_round_start = {
+            p.id: len(p.encumbered_shares) for p in self.state_obj.players
+        }
         self.refresh()
         self._maybe_take_bot_turn()
 

@@ -69,6 +69,35 @@ from manilla.engine.wealth import best_pilot_move_spec
 # ----------------------------------------------------------------------
 
 
+@dataclass
+class VoyageBaseline:
+    """Where a voyage's earnings are measured from: each player's cash once
+    the auction and share purchase are settled, and how many shares they
+    already had encumbered at that moment.
+
+    The encumbrance count is here because encumbering during the voyage
+    raises cash by `SHARE_LOAN_AMOUNT` in exchange for a debt. Without it,
+    a player who ran short would look like they had *earned* 12 pesos.
+    """
+
+    cash: Dict[str, int]
+    encumbered: Dict[str, int]
+
+    @staticmethod
+    def snapshot(state: GameState) -> "VoyageBaseline":
+        return VoyageBaseline(
+            cash={p.id: p.cash for p in state.players},
+            encumbered={p.id: len(p.encumbered_shares) for p in state.players},
+        )
+
+    def earnings(self, player: Player) -> int:
+        """What `player`'s accomplices actually earned since the snapshot:
+        their cash change, less the loan value of any share they encumbered
+        along the way."""
+        borrowed = max(0, len(player.encumbered_shares) - self.encumbered.get(player.id, 0))
+        return player.cash - self.cash.get(player.id, player.cash) - SHARE_LOAN_AMOUNT * borrowed
+
+
 def _settle_payment(rng: random.Random, player: Player, amount: int) -> bool:
     while player.cash < amount and player.unencumbered_shares:
         share = rng.choice(player.unencumbered_shares)
@@ -633,7 +662,7 @@ def run_voyage(
     state: GameState,
     rng: random.Random,
     on_loaded: Optional[Callable[[GameState, Player], None]] = None,
-    on_voyage_end: Optional[Callable[[GameState, Player, Dict[str, int]], None]] = None,
+    on_voyage_end: Optional[Callable[[GameState, Player, "VoyageBaseline"], None]] = None,
 ) -> None:
     """Runs one full voyage -- auction through profit distribution --
     exactly matching `BoardSetupApp`'s dialog chain but with no UI at all.
@@ -642,14 +671,15 @@ def run_voyage(
     `on_loaded(state, harbor_master)`, if given, fires once wares are
     loaded and punts are positioned (before any accomplice placement) --
     the earliest point the harbor master's punt-positioning choice
-    actually exists. `on_voyage_end(state, harbor_master,
-    cash_after_setup)`, if given, fires once this voyage's profits are
-    fully distributed; `cash_after_setup` is `{player_id: cash}` taken
-    *after* both the auction and the harbor master's share purchase have
-    been paid for, so `cash_after - cash_after_setup` isolates what the
-    accomplices themselves earned this voyage -- placement costs, cargo
-    and port/shipyard payouts, plunder, the insurance bonus -- with the
-    price of winning the office excluded.
+    actually exists. `on_voyage_end(state, harbor_master, baseline)`, if
+    given, fires once this voyage's profits are fully distributed;
+    `baseline` is a `VoyageBaseline` taken *after* both the auction and the
+    harbor master's share purchase have been paid for, so
+    `baseline.earnings(player)` isolates what the accomplices themselves
+    earned this voyage -- placement costs, cargo and port/shipyard payouts,
+    plunder, the insurance bonus -- with the price of winning the office
+    excluded, and with any mid-voyage encumbrance treated as the loan it is
+    rather than as income.
 
     Snapshotting here rather than at the top of the voyage keeps two
     different questions apart: what a seat position is *worth* in
@@ -658,12 +688,6 @@ def run_voyage(
     would be trained on a target its own bids had already moved.
     `_run_load_and_place` costs nothing, so taking the snapshot before
     or after it is numerically identical.
-
-    One caveat this does *not* net out: a player who runs short mid-
-    voyage encumbers a share via `_settle_payment`, which raises their
-    cash by `SHARE_LOAN_AMOUNT` in exchange for a debt. That shows up
-    here as earnings even though it's a loan, so a seat's mean will read
-    slightly high wherever encumbering is common.
 
     Both exist for `manilla.engine.selfplay_data`'s training/analysis
     data collection -- see there for what actually gets recorded."""
@@ -685,7 +709,7 @@ def run_voyage(
     # master paid to *get* the office (winning bid, share purchase) is
     # already settled, so the delta measured against this is accomplice
     # earnings alone. See the docstring for why the two are kept apart.
-    cash_after_setup = {p.id: p.cash for p in state.players}
+    baseline = VoyageBaseline.snapshot(state)
 
     _run_load_and_place(state, rng, harbor_master, planned_setup=planned_setup)
     if on_loaded is not None:
@@ -705,7 +729,7 @@ def run_voyage(
             plundered = _roll_dice_and_move(state, rng)
             _distribute_profits(state, rng, plundered)
             if on_voyage_end is not None:
-                on_voyage_end(state, harbor_master, cash_after_setup)
+                on_voyage_end(state, harbor_master, baseline)
             return
 
         _roll_dice_and_move(state, rng)
@@ -771,7 +795,7 @@ def run_game(
     rng: Optional[random.Random] = None,
     max_voyages: int = 200,
     on_loaded: Optional[Callable[[GameState, Player], None]] = None,
-    on_voyage_end: Optional[Callable[[GameState, Player, Dict[str, int]], None]] = None,
+    on_voyage_end: Optional[Callable[[GameState, Player, "VoyageBaseline"], None]] = None,
 ) -> GameResult:
     """Plays `state` forward, voyage after voyage, until a ware's black-
     market value reaches 30 (`BlackMarket.is_game_over`). `max_voyages`

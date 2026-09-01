@@ -20,7 +20,15 @@ from unittest import mock
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from manilla.ui.board_setup import BoardSetupApp
-from manilla.engine.models import INSURANCE_PAYMENT, INSURANCE_SHIPYARD_COST, Punt, PuntStatus, Ware
+from manilla.engine.models import (
+    INSURANCE_PAYMENT,
+    INSURANCE_SHIPYARD_COST,
+    SHARE_LOAN_AMOUNT,
+    Punt,
+    PuntStatus,
+    Share,
+    Ware,
+)
 
 
 class ProfitSummaryTestCase(unittest.TestCase):
@@ -105,6 +113,66 @@ class TestVoyageProfitSummaryReflectsNetChange(ProfitSummaryTestCase):
         self.assertIn(f"{players[0].color}: -4", message)
         self.assertIn(f"{players[1].color}: +24", message)
         self.assertIn(f"{players[2].color}: +6", message)
+
+
+class TestVoyageProfitSummaryNetsOutEncumbrance(ProfitSummaryTestCase):
+    """Encumbering a share raises cash by SHARE_LOAN_AMOUNT, so a pure cash
+    diff would credit a player 12 PESOS for taking a loan -- flattering
+    exactly the players whose voyage went worst. It has to be subtracted
+    back out."""
+
+    def test_a_single_encumbrance_does_not_read_as_twelve_pesos_of_profit(self):
+        players = self.state.players
+        player = players[0]
+        player.shares = [Share(ware=Ware.JADE), Share(ware=Ware.SILK)]
+        self.app._cash_at_round_start = {p.id: p.cash for p in players}
+        self.app._encumbered_at_round_start = {p.id: len(p.encumbered_shares) for p in players}
+
+        # Exactly what _settle_payment does when a player runs short.
+        player.shares[0].encumbered = True
+        player.cash += SHARE_LOAN_AMOUNT
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
+            self.app._distribute_profits([], then=None)
+            message = showinfo.call_args[0][1]
+
+        self.assertIn(f"{player.color}: +0", message)
+
+    def test_two_encumbrances_are_both_netted_out(self):
+        players = self.state.players
+        player = players[0]
+        player.shares = [Share(ware=Ware.JADE), Share(ware=Ware.SILK)]
+        self.app._cash_at_round_start = {p.id: p.cash for p in players}
+        self.app._encumbered_at_round_start = {p.id: len(p.encumbered_shares) for p in players}
+
+        for share in player.shares:
+            share.encumbered = True
+            player.cash += SHARE_LOAN_AMOUNT
+        player.cash -= 5  # a placement paid for out of the borrowed money
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
+            self.app._distribute_profits([], then=None)
+            message = showinfo.call_args[0][1]
+
+        # +24 borrowed, -5 spent -> the only real movement is the -5.
+        self.assertIn(f"{player.color}: -5", message)
+
+    def test_a_share_encumbered_before_the_voyage_is_not_subtracted_again(self):
+        """Only encumbrances taken *during* this voyage count -- a player
+        who arrived already encumbered shouldn't be penalised for it."""
+        players = self.state.players
+        player = players[0]
+        player.shares = [Share(ware=Ware.JADE, encumbered=True)]
+        self.app._cash_at_round_start = {p.id: p.cash for p in players}
+        self.app._encumbered_at_round_start = {p.id: len(p.encumbered_shares) for p in players}
+
+        player.cash += 10  # a genuine payout
+
+        with mock.patch("manilla.ui.board_setup.messagebox.showinfo") as showinfo:
+            self.app._distribute_profits([], then=None)
+            message = showinfo.call_args[0][1]
+
+        self.assertIn(f"{player.color}: +10", message)
 
 
 class TestVoyageProfitSummaryInsurance(ProfitSummaryTestCase):

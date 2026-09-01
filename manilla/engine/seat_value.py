@@ -76,6 +76,20 @@ from typing import Dict, Optional, Sequence, Tuple
 # 0.41, and the shape is unchanged, which is the empirical answer to
 # whether feeding these back into bidding would shift them. It doesn't,
 # to any degree worth iterating on.
+# !! KNOWN TO BE INFLATED, pending a re-measurement (2026-08-31). These
+# were recorded under schema v2, before earnings netted out mid-voyage
+# encumbrance -- a player who ran short and pledged a share had the
+# SHARE_LOAN_AMOUNT loan counted as income. That flatters the harbor master
+# most, since paying for the auction and the share is what makes anyone run
+# short in the first place.
+#
+# How much it matters, measured on 15,037 random-policy voyages under the
+# corrected v3 rule: offset 0 fell from +8.96 to +5.10 while the other
+# seats moved by under 0.8, which all but erased the harbor master's edge
+# *under random bidding*. The REV figures below have not been re-measured
+# yet and the same correction will pull offset 0 down by some amount, so
+# treat the harbor-master advantage here as an upper bound until a fresh
+# REV run under v3 replaces them.
 MEASURED_SEAT_PROFIT: Dict[int, Tuple[float, ...]] = {
     4: (17.036, 6.540, 5.045, 5.527),
 }
