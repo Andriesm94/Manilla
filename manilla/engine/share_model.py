@@ -59,7 +59,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from manilla.engine.models import GameState, Ware
+from manilla.engine.models import SHARES_PER_WARE, GameState, Ware
 
 FEATURE_NAMES: Tuple[str, ...] = (
     "bias",
@@ -277,6 +277,46 @@ def train(rows: Sequence[dict], alpha: float = 1.0) -> ShareValueModel:
     return ShareValueModel(coefficients=fit_ridge(features, targets, alpha))
 
 
+def share_price_of(level: int) -> int:
+    """A share's price at a black-market level -- mirrors
+    `BlackMarket.share_price`'s 5-peso floor, from a recorded row rather
+    than a live board."""
+    return max(5, level)
+
+
+def realized_net_value(row: dict, ware: Optional[Ware]) -> float:
+    """What buying `ware` on this voyage was actually worth, in pesos: the
+    level it finished at minus the price paid for it. `None` means the
+    harbor master declined to buy, which is worth exactly 0 -- declining is
+    a real option and has to score as one."""
+    if ware is None:
+        return 0.0
+    return float(row["final_black_market"][ware.value]) - share_price_of(row["black_market"][ware.value])
+
+
+def _available_wares(row: dict) -> List[Ware]:
+    return [w for w in Ware if row["shares_in_play"].get(w.value, 0) < SHARES_PER_WARE]
+
+
+def choose_from_row(model: ShareValueModel, row: dict) -> Optional[Ware]:
+    """The purchase `plan_share_purchase` would make, computed from a
+    recorded row instead of a live `GameState`.
+
+    Deliberately mirrors that function rather than sharing code, because
+    one takes a board and the other a JSON row -- `TestChooseFromRow`
+    pins them to the same answer so the mirror can't quietly drift.
+    """
+    best: Optional[Tuple[float, Ware]] = None
+    for ware in _available_wares(row):
+        predicted = model.predict(
+            ware, row["shares_in_play"], row["favored_wares"], row["voyage_number"], row["black_market"]
+        )
+        net = predicted - share_price_of(row["black_market"][ware.value])
+        if net > 0 and (best is None or net > best[0]):
+            best = (net, ware)
+    return best[1] if best else None
+
+
 @dataclass
 class Evaluation:
     n_examples: int
@@ -287,6 +327,18 @@ class Evaluation:
     top_pick_accuracy: float
     favored_pick_accuracy: float
     random_pick_accuracy: float
+    # Decision quality in pesos -- what the model's actual buying rule earns
+    # per voyage, against what was achievable and what the alternatives get.
+    mean_net_value: float
+    oracle_net_value: float
+    favored_net_value: float
+    random_net_value: float
+    abstain_rate: float
+
+    @property
+    def regret(self) -> float:
+        """Pesos per decision left on the table against perfect foresight."""
+        return self.oracle_net_value - self.mean_net_value
 
     def __str__(self) -> str:
         return (
@@ -296,7 +348,12 @@ class Evaluation:
             f"(predict-the-mean baseline {self.baseline_mae:.3f})\n"
             f"  top-pick accuracy {self.top_pick_accuracy:.3f} "
             f"(favoured-ware rule {self.favored_pick_accuracy:.3f}, "
-            f"random {self.random_pick_accuracy:.3f})"
+            f"random {self.random_pick_accuracy:.3f})\n"
+            f"  net value/voyage  {self.mean_net_value:+.3f} pesos "
+            f"(oracle {self.oracle_net_value:+.3f}, regret {self.regret:.3f})\n"
+            f"                    favoured-ware rule {self.favored_net_value:+.3f}, "
+            f"random {self.random_net_value:+.3f}, never buy +0.000\n"
+            f"  abstain rate      {self.abstain_rate:.3f}"
         )
 
 
@@ -321,10 +378,25 @@ def evaluate(model: ShareValueModel, rows: Sequence[dict], seed: int = 0) -> Eva
     wares = list(Ware)
     rng = random.Random(seed)
     hits = favored_hits = random_hits = 0
+    net_total = oracle_total = favored_net_total = random_net_total = 0.0
+    abstains = 0
     for row in rows:
         finals = row["final_black_market"]
         best = max(finals[w.value] for w in wares)
         winners = {w.value for w in wares if finals[w.value] == best}
+
+        # --- decision quality, in pesos ---
+        available = _available_wares(row)
+        chosen = choose_from_row(model, row)
+        abstains += chosen is None
+        net_total += realized_net_value(row, chosen)
+        # Perfect foresight, including the option to decline entirely.
+        oracle_total += max([0.0] + [realized_net_value(row, w) for w in available])
+        favored_choice = next(
+            (w for w in available if w.value in row["favored_wares"]), None
+        )
+        favored_net_total += realized_net_value(row, favored_choice)
+        random_net_total += realized_net_value(row, rng.choice(available) if available else None)
 
         scored = [
             (
@@ -349,6 +421,11 @@ def evaluate(model: ShareValueModel, rows: Sequence[dict], seed: int = 0) -> Eva
         top_pick_accuracy=hits / n,
         favored_pick_accuracy=favored_hits / n,
         random_pick_accuracy=random_hits / n,
+        mean_net_value=net_total / n,
+        oracle_net_value=oracle_total / n,
+        favored_net_value=favored_net_total / n,
+        random_net_value=random_net_total / n,
+        abstain_rate=abstains / n,
     )
 
 

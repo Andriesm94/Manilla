@@ -10,18 +10,21 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from manilla.engine.models import GameState, Ware
+from manilla.engine.models import SHARES_PER_WARE, GameState, Share, Ware
 from manilla.engine.share_model import (
     DEFAULT_COEFFICIENTS,
     FEATURE_NAMES,
     ShareValueModel,
     best_share_to_buy,
+    choose_from_row,
     default_model,
     evaluate,
     extract_features,
     favored_wares_from_setup,
     fit_ridge,
     load_rows,
+    realized_net_value,
+    share_price_of,
     train,
     train_test_split,
 )
@@ -173,6 +176,106 @@ class TestEvaluate(unittest.TestCase):
         for accuracy in (result.top_pick_accuracy, result.favored_pick_accuracy, result.random_pick_accuracy):
             self.assertGreaterEqual(accuracy, 0.0)
             self.assertLessEqual(accuracy, 1.0)
+
+
+class TestRealizedNetValue(unittest.TestCase):
+    def test_declining_to_buy_is_worth_exactly_zero(self):
+        row = _row("g", 1, FLAT, [], FLAT, {**FLAT, "jade": 30})
+        self.assertEqual(realized_net_value(row, None), 0.0)
+
+    def test_is_final_level_minus_the_price_paid(self):
+        row = _row("g", 1, FLAT, [], {**FLAT, "jade": 20}, {**FLAT, "jade": 30})
+        self.assertEqual(realized_net_value(row, Ware.JADE), 10.0)
+
+    def test_price_respects_the_five_peso_floor(self):
+        # A ware at level 0 still costs 5, so finishing at 5 nets nothing.
+        row = _row("g", 1, FLAT, [], FLAT, {**FLAT, "jade": 5})
+        self.assertEqual(share_price_of(0), 5)
+        self.assertEqual(realized_net_value(row, Ware.JADE), 0.0)
+
+    def test_a_ware_that_never_rises_is_a_loss(self):
+        row = _row("g", 1, FLAT, [], {**FLAT, "jade": 20}, {**FLAT, "jade": 20})
+        self.assertEqual(realized_net_value(row, Ware.JADE), 0.0)
+        row = _row("g", 1, FLAT, [], {**FLAT, "jade": 20}, {**FLAT, "jade": 10})
+        self.assertEqual(realized_net_value(row, Ware.JADE), -10.0)
+
+
+class TestChooseFromRow(unittest.TestCase):
+    """`choose_from_row` mirrors `plan_share_purchase` -- one reads a row,
+    the other a live board. Pin them together so the mirror can't drift."""
+
+    def _state_matching(self, row):
+        state = GameState.new_default_game(["A", "B", "C", "D"])
+        state.voyage_number = row["voyage_number"]
+        for player in state.players:
+            player.shares = []
+        for ware in Ware:
+            state.black_market.values[ware] = row["black_market"][ware.value]
+            for _ in range(row["shares_in_play"][ware.value]):
+                state.players[0].shares.append(Share(ware=ware))
+        return state
+
+    def test_agrees_with_the_live_board_decision(self):
+        model = default_model()
+        cases = [
+            ({**FLAT, "jade": 20, "silk": 5}, ["jade", "silk"]),
+            ({**FLAT, "jade": 20, "silk": 5}, ["nutmeg", "ginseng"]),
+            ({**FLAT, "ginseng": 10}, ["ginseng", "nutmeg"]),
+            (FLAT, []),
+        ]
+        for market, favored in cases:
+            for shares in ({w.value: 0 for w in Ware}, {**{w.value: 0 for w in Ware}, "jade": 5}):
+                with self.subTest(market=market, favored=favored, shares=shares):
+                    row = _row("g", 3, shares, favored, market, FLAT)
+                    state = self._state_matching(row)
+                    self.assertEqual(
+                        choose_from_row(model, row),
+                        best_share_to_buy(model, state, favored),
+                    )
+
+    def test_never_picks_a_sold_out_ware(self):
+        shares = {w.value: 0 for w in Ware}
+        shares["jade"] = SHARES_PER_WARE
+        row = _row("g", 1, shares, ["jade"], {**FLAT, "jade": 20}, FLAT)
+        self.assertNotEqual(choose_from_row(default_model(), row), Ware.JADE)
+
+
+class TestNetValueEvaluation(unittest.TestCase):
+    def _rows(self, n=40):
+        rows = []
+        for g in range(n):
+            level = (g % 4) * 5
+            rows.append(
+                _row(
+                    f"g{g}", 1 + (g % 3),
+                    {w.value: 0 for w in Ware},
+                    ["jade"],
+                    {**FLAT, "jade": level},
+                    {**FLAT, "jade": min(30, level + 10), "silk": 5},
+                )
+            )
+        return rows
+
+    def test_oracle_is_never_beaten_by_the_model(self):
+        """Perfect foresight is an upper bound by construction -- if this
+        ever fails, the two are being computed over different option sets."""
+        result = evaluate(default_model(), self._rows())
+        self.assertGreaterEqual(result.oracle_net_value, result.mean_net_value)
+        self.assertAlmostEqual(result.regret, result.oracle_net_value - result.mean_net_value)
+
+    def test_oracle_never_goes_negative_because_declining_is_allowed(self):
+        # Every ware finishes below its price, so the best play is to buy
+        # nothing at all -- the oracle must find that, not the least-bad buy.
+        rows = [
+            _row(f"g{i}", 1, {w.value: 0 for w in Ware}, [], {w.value: 20 for w in Ware}, {w.value: 20 for w in Ware})
+            for i in range(5)
+        ]
+        self.assertEqual(evaluate(default_model(), rows).oracle_net_value, 0.0)
+
+    def test_abstain_rate_is_a_fraction(self):
+        result = evaluate(default_model(), self._rows())
+        self.assertGreaterEqual(result.abstain_rate, 0.0)
+        self.assertLessEqual(result.abstain_rate, 1.0)
 
 
 class TestSerialization(unittest.TestCase):
