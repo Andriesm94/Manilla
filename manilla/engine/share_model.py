@@ -79,23 +79,27 @@ DEFAULT_DATA_PATH = Path("data") / "bid_buy_training.jsonl"
 # docstring for why that makes them unusable here rather than merely worse.
 MIN_SCHEMA_VERSION = 2
 
-# Trained on 3,000 four-player random-policy games (17,949 voyages),
-# 2026-08-30. Provisional on purpose: the relationship it captures is
-# structural -- how a ware's current level and the harbor master's
-# positioning drive where it ends up -- but the *distribution* of boards
-# a random bot produces isn't the one a REV bot produces. Retrain with
-# `train` on REV rows once a run has been recorded with the black_market
-# field (every REV row banked before 2026-08-30 predates it).
+# Trained on 10,548 four-player REV voyages (the training half of 14,108
+# across 2,324 games), 2026-08-31 -- the distribution these coefficients
+# will actually face, replacing a provisional fit on random-policy games.
+#
+# On held-out REV games this scores R^2 0.273 and picks the best ware 54.4%
+# of the time, against 42.9% for the "just buy the favoured ware" heuristic
+# and 29.2% for random choice. The earlier random-policy fit scored 0.208 /
+# 52.8% on the same held-out games -- so it transferred better than it had
+# any right to, which is decent evidence the relationship really is
+# structural, but training on the right distribution is still worth 1.6
+# points of accuracy.
 DEFAULT_COEFFICIENTS: Tuple[float, ...] = (
-    13.9150,
-    -0.0319,
-    4.2192,
-    -0.0395,
-    0.0564,
-    0.0196,
-    1.3030,
-    -0.2743,
-    -0.0239,
+    6.5493,
+    -1.3943,
+    4.4272,
+    -0.6611,
+    1.2479,
+    0.3012,
+    1.0527,
+    -0.2267,
+    0.0511,
 )
 
 

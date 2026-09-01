@@ -39,10 +39,10 @@ from manilla.engine.models import (
 from manilla.engine.beliefs import infer_beliefs
 from manilla.engine.harbor_master import (
     best_punt_setup,
-    best_shares_to_buy,
     decide_harbor_master_bid,
     harbor_master_bid_context,
 )
+from manilla.engine import share_model
 from manilla.engine.seat_value import seat_profit_means
 from manilla.engine.policy import choose_accomplice_action
 from manilla.engine.wealth import best_pilot_move_spec, best_pirate_boarding_move, pirate_slot_ev_if_taken_now
@@ -120,6 +120,8 @@ class BoardSetupApp(tk.Frame):
         # case the player count changed) rather than per voyage, and not
         # saved -- it's a policy-internal detail, not real game state.
         self._seat_profit_means: tuple = seat_profit_means(len(self.state_obj.players))
+        # Learned share-buying model, built once for the app's lifetime.
+        self._share_model = share_model.default_model()
         # Each player's cash at the moment this voyage's accomplice-
         # placement phase began (_apply_load_and_place) -- the baseline
         # the round-end "Voyage profit summary" diffs against, so it
@@ -2120,12 +2122,16 @@ class BoardSetupApp(tk.Frame):
 
     def _bot_buy_share(self, player: Player, available: List[Ware], then: Callable[[], None]) -> None:
         if player.policy == "rev":
-            # Ties (equally good options) are broken randomly -- see
-            # harbor_master.best_shares_to_buy.
+            # The learned model (manilla.engine.share_model) picks the share
+            # whose ware it expects to finish highest, net of today's price.
+            # Buying happens before the punts are positioned, so it reasons
+            # against the harbor master's own intended setup -- the same
+            # coupling the heuristic it replaced used.
             beliefs = infer_beliefs(self.state_obj, player.id)
-            candidates = best_shares_to_buy(self.state_obj, beliefs, player.id)
-            if candidates:
-                ware = random.choice(candidates)
+            planned = best_punt_setup(self.state_obj, beliefs, player.id)[0]
+            favored = share_model.favored_wares_from_setup(*planned)
+            ware = share_model.best_share_to_buy(self._share_model, self.state_obj, favored)
+            if ware is not None:
                 price = self.state_obj.black_market.share_price(ware)
                 if self._settle_payment(player, price):
                     player.shares.append(Share(ware=ware))

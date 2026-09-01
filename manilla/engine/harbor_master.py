@@ -175,7 +175,16 @@ def best_shares_to_buy(
     """Every available ware tied for the best share-buying value -- empty
     if buying isn't worthwhile at all. Per the user, when several tie, the
     actual purchase should be picked randomly among them; this only
-    narrows down that tied-best set, it doesn't do the picking."""
+    narrows down that tied-best set, it doesn't do the picking.
+
+    **No longer drives the live purchase** (2026-08-31): both
+    `selfplay._run_buy_share` and `BoardSetupApp._bot_buy_share` now choose
+    through `manilla.engine.share_model`, which predicts each ware's final
+    black-market level from self-play data and beats this heuristic by a
+    wide margin (54.4% top-pick accuracy against 42.9%). Kept because
+    `_share_buying_values` underneath it still prices the share-buying
+    *component of a bid* -- see `harbor_master_bid_context` -- and as the
+    baseline the model is measured against."""
     values = _share_buying_values(state, beliefs, my_id, p_safe_if_caught, planned_punt_setup)
     if not values:
         return []
@@ -449,11 +458,18 @@ def harbor_master_bid_context(
     choosing arbitrarily, which *is* directly comparable to a bid price.
 
     The preferred share's price is the *most expensive* among every ware
-    tied for `share_buying_value`'s best score -- since the real purchase
-    breaks ties randomly (`best_shares_to_buy`), assuming the priciest one
-    is the defensible worst case for an affordability check, matching the
-    defensive framing `wealth.DEFENSIVE_WEALTH_MARGIN` already uses
-    elsewhere for opponents' unknowns.
+    tied for `share_buying_value`'s best score -- a defensible worst case
+    for an affordability check, matching the defensive framing
+    `wealth.DEFENSIVE_WEALTH_MARGIN` already uses elsewhere for opponents'
+    unknowns.
+
+    Note this deliberately still values shares heuristically, while the
+    purchase it is anticipating now goes through the learned model
+    (`manilla.engine.share_model`): bidding was explicitly scoped to stay
+    hand-tuned, so the two can disagree about which ware is worth most. The
+    worst-case pricing above limits the damage -- the bid only needs the
+    cost of *a* share to be covered, not to name the same one -- but if
+    bidding is ever revisited, unifying them is the obvious first move.
     """
     rivals = identify_rivals(state, beliefs, my_id, p_safe_if_caught)
 

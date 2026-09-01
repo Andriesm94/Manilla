@@ -35,7 +35,6 @@ from typing import Callable, Dict, List, Optional
 from manilla.engine.beliefs import infer_beliefs
 from manilla.engine.harbor_master import (
     best_punt_setup,
-    best_shares_to_buy,
     decide_harbor_master_bid,
     harbor_master_bid_context,
 )
@@ -57,6 +56,7 @@ from manilla.engine.models import (
     Share,
     Ware,
 )
+from manilla.engine import share_model
 from manilla.engine.seat_value import seat_profit_means
 from manilla.engine.policy import AccompliceChoice, choose_accomplice_action
 from manilla.engine.wealth import best_pilot_move_spec
@@ -521,32 +521,62 @@ def _run_auction(state: GameState, rng: random.Random) -> None:
     # voyage) is left unchanged, exactly matching end_auction.
 
 
-def _run_buy_share(state: GameState, rng: random.Random, harbor_master: Player) -> None:
+# The shipped share-buying model, built once. Swap in a retrained one by
+# assigning to this -- see manilla.engine.share_model.
+_SHARE_MODEL = share_model.default_model()
+
+
+def _run_buy_share(
+    state: GameState, rng: random.Random, harbor_master: Player
+) -> Optional[Tuple[List[Ware], Dict[Ware, int]]]:
+    """Buy the harbor master's one share, and return the punt setup a REV
+    harbor master planned while deciding (`None` otherwise).
+
+    The share choice needs to know which wares this voyage will favour, but
+    buying happens *before* the punts are positioned -- so the harbor master
+    reasons against their own intended setup. That's the same coupling the
+    old heuristic had; returning it lets `_run_load_and_place` reuse the
+    plan instead of recomputing `best_punt_setup`, which is the expensive
+    call in a REV voyage.
+    """
     available = [w for w in Ware if state.shares_available(w) > 0]
     if not available:
-        return
+        return None
 
     if harbor_master.policy == "rev":
         beliefs = infer_beliefs(state, harbor_master.id)
-        candidates = best_shares_to_buy(state, beliefs, harbor_master.id)
-        if candidates:
-            ware = rng.choice(candidates)
+        planned = best_punt_setup(state, beliefs, harbor_master.id)[0]
+        favored = share_model.favored_wares_from_setup(*planned)
+        ware = share_model.best_share_to_buy(_SHARE_MODEL, state, favored)
+        if ware is not None:
             price = state.black_market.share_price(ware)
             if _settle_payment(rng, harbor_master, price):
                 harbor_master.shares.append(Share(ware=ware))
-        return
+        return planned
 
     if rng.random() < 0.5:
         ware = rng.choice(available)
         price = state.black_market.share_price(ware)
         if _settle_payment(rng, harbor_master, price):
             harbor_master.shares.append(Share(ware=ware))
+    return None
 
 
-def _run_load_and_place(state: GameState, rng: random.Random, harbor_master: Player) -> None:
+def _run_load_and_place(
+    state: GameState,
+    rng: random.Random,
+    harbor_master: Player,
+    planned_setup: Optional[Tuple[List[Ware], Dict[Ware, int]]] = None,
+) -> None:
     if harbor_master.policy == "rev":
-        beliefs = infer_beliefs(state, harbor_master.id)
-        (loaded, positions), _ = best_punt_setup(state, beliefs, harbor_master.id)
+        if planned_setup is not None:
+            # Already computed while choosing which share to buy -- see
+            # _run_buy_share. Recomputing would repeat the single most
+            # expensive call in the voyage for an identical answer.
+            loaded, positions = planned_setup
+        else:
+            beliefs = infer_beliefs(state, harbor_master.id)
+            (loaded, positions), _ = best_punt_setup(state, beliefs, harbor_master.id)
     else:
         wares = list(Ware)
         rng.shuffle(wares)
@@ -649,7 +679,7 @@ def run_voyage(
         # own no-op in this case.
         return
 
-    _run_buy_share(state, rng, harbor_master)
+    planned_setup = _run_buy_share(state, rng, harbor_master)
 
     # Taken here, not at the top of the voyage: everything the harbor
     # master paid to *get* the office (winning bid, share purchase) is
@@ -657,7 +687,7 @@ def run_voyage(
     # earnings alone. See the docstring for why the two are kept apart.
     cash_after_setup = {p.id: p.cash for p in state.players}
 
-    _run_load_and_place(state, rng, harbor_master)
+    _run_load_and_place(state, rng, harbor_master, planned_setup=planned_setup)
     if on_loaded is not None:
         on_loaded(state, harbor_master)
 
