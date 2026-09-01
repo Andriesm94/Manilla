@@ -6,49 +6,33 @@ This replaces the hand-picked random first-mover coefficient that
 real self-play games via `selfplay_data.record_self_play_games`.
 
 The old model assumed the cost of sitting one spot further back was
-*linear* in distance. The measurement says it plainly isn't -- being
-harbor master is worth about 10.6 pesos over the next seat, while every
-seat after that is within roughly a peso of the others and not even
-ordered monotonically. It's a step, not a slope:
+*linear* in distance. The measurement says it plainly isn't: the harbor
+master is clearly ahead, and every seat behind is within about a peso of
+the others, not even ordered monotonically. It's a step, not a slope --
+which is why `first_mover_value` looks the gap up in a table rather than
+multiplying by seat distance.
 
-    offset 0 (harbor master)  +16.79
-    offset 1                   +6.14
-    offset 2                   +4.91
-    offset 3                   +5.79
-
-so the old formula badly undervalued winning the auction when the next
-active bidder sat immediately behind (3.75 pesos assumed at the midpoint
-coefficient, against 10.65 measured) while roughly matching it at three
-spots back.
-
-Two things to keep in mind when using or refreshing these numbers:
+Three things to keep in mind when using or refreshing these numbers:
 
 * **They are accomplice earnings, not the whole value of the office.**
-  The snapshot they come from starts after the auction and share
-  purchase are paid for (see `selfplay.run_voyage`'s `cash_after_setup`),
-  which is what makes them safe to price a bid against -- but it also
-  means the share the harbor master buys and their steering of the black
-  market via punt positioning are not in here. Treat them as a floor.
-* **Feeding them back into bidding is not circular.** What they measure
-  is accomplice placement, and `policy.choose_accomplice_action` never
-  reads the seat table or `first_mover_value` -- the placement rule is
+  The snapshot they come from starts after the auction and share purchase
+  are paid for (`selfplay.VoyageBaseline`), which is what makes them safe
+  to price a bid against -- but it also means the share the harbor master
+  buys and their steering of the black market via punt positioning are not
+  in here. Treat them as a floor.
+* **Feeding them back into bidding is not circular.** What they measure is
+  accomplice placement, and `policy.choose_accomplice_action` never reads
+  the seat table or `first_mover_value` -- the placement rule is
   independent of the bidding rule, so changing how bots bid does not
-  invalidate the figures they placed under. They were measured under the
-  old random coefficient and stay valid under this one.
-
-  The one channel that does connect the two is cash, not policy: a bid is
-  paid out of the same purse the accomplices are placed from, so bidding
-  higher leaves less to place with. That matters in principle because a
-  player who runs short encumbers a share, which *raises* cash by
-  `SHARE_LOAN_AMOUNT` and reads as earnings in this measurement (see the
-  caveat above), so bidding harder could inflate the harbor master's own
-  figure without any better play behind it.
-
-  Measured, that effect is negligible. Re-running 14,108 voyages under the
-  new bidding moved offset 0 by +0.25 against a standard error of 0.09 on
-  each figure, and no seat moved by more than 0.41. The table above is the
-  post-change measurement, so it is now a fixed point rather than a
-  one-step iteration.
+  invalidate the figures they placed under. Confirmed empirically:
+  re-measuring 14,108 voyages after bidding switched to these figures
+  moved no seat by more than 0.41, against a standard error of 0.09.
+* **An encumbrance is a loan, not income.** Until schema v3 (2026-08-31)
+  a player who ran short mid-voyage and pledged a share had the
+  `SHARE_LOAN_AMOUNT` counted as earnings. That inflated every figure and
+  the harbor master's most, since paying for the auction and the share is
+  what makes anyone run short. `measure_seat_profit_means` refuses rows
+  below v3 rather than averaging them in -- see `MIN_SCHEMA_VERSION`.
 """
 
 from __future__ import annotations
@@ -63,33 +47,18 @@ from typing import Dict, Optional, Sequence, Tuple
 # seat's offset from the harbor master (0 = the harbor master).
 #
 # Source: 14,108 four-player REV voyages across 2,324 games, measured
-# 2026-08-31. Standard error on each figure is about 0.09 (clustered by
-# game, since voyages within one game share a board and dice history), so
-# the harbor-master gap is far beyond doubt while the ordering *among*
-# the non-harbor-master seats is real but small.
+# 2026-08-31 under bidding that already used the previous measurement.
+# Standard error about 0.09, clustered by game.
 #
-# These are the *self-consistent* figures: they were measured under bidding
-# that already used the previous measurement, so the table now reproduces
-# itself rather than describing a policy that no longer exists. The
-# previous run (11,604 voyages under the old random-coefficient bidding)
-# gave 16.786 / 6.139 / 4.911 / 5.789 -- every seat moved by less than
-# 0.41, and the shape is unchanged, which is the empirical answer to
-# whether feeding these back into bidding would shift them. It doesn't,
-# to any degree worth iterating on.
-# !! KNOWN TO BE INFLATED, pending a re-measurement (2026-08-31). These
-# were recorded under schema v2, before earnings netted out mid-voyage
-# encumbrance -- a player who ran short and pledged a share had the
-# SHARE_LOAN_AMOUNT loan counted as income. That flatters the harbor master
-# most, since paying for the auction and the share is what makes anyone run
-# short in the first place.
-#
-# How much it matters, measured on 15,037 random-policy voyages under the
-# corrected v3 rule: offset 0 fell from +8.96 to +5.10 while the other
-# seats moved by under 0.8, which all but erased the harbor master's edge
-# *under random bidding*. The REV figures below have not been re-measured
-# yet and the same correction will pull offset 0 down by some amount, so
-# treat the harbor-master advantage here as an upper bound until a fresh
-# REV run under v3 replaces them.
+# !! KNOWN TO BE INFLATED -- a v3 re-measurement is running. These rows
+# predate the encumbrance correction (see the third bullet above), so a
+# mid-voyage loan was counted as income. On 15,037 random-policy voyages
+# under the corrected rule, offset 0 fell from +8.96 to +5.10 while every
+# other seat moved by under 0.8 -- which all but erased the harbor
+# master's edge *under random bidding*. REV harbor masters bid harder and
+# so run short more often, so the correction plausibly bites at least as
+# hard here, but that hasn't been measured yet. Treat offset 0 as an
+# upper bound until a v3 REV run replaces these.
 MEASURED_SEAT_PROFIT: Dict[int, Tuple[float, ...]] = {
     4: (17.036, 6.540, 5.045, 5.527),
 }
@@ -118,6 +87,13 @@ def seat_profit_means(player_count: int) -> Tuple[float, ...]:
     return (harbor_master,) + (later_seat,) * max(0, player_count - 1)
 
 
+# Rows below this counted a mid-voyage encumbrance loan as earnings, which
+# inflates every figure and the harbor master's most -- see the note on
+# MEASURED_SEAT_PROFIT. Mixing them into a fresh measurement would quietly
+# bias it upward, so they're refused rather than averaged in.
+MIN_SCHEMA_VERSION = 3
+
+
 def measure_seat_profit_means(
     path: Optional[Path] = None,
     policy: str = "rev",
@@ -142,6 +118,8 @@ def measure_seat_profit_means(
         if not line.strip():
             continue
         row = json.loads(line)
+        if row.get("schema_version", 1) < MIN_SCHEMA_VERSION:
+            continue
         if row.get("policy") != policy or row.get("player_count") != player_count:
             continue
         for offset, pesos in row["pesos_by_seat_offset"].items():
