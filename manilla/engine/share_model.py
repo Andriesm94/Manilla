@@ -360,18 +360,37 @@ def favored_wares_from_setup(wares_loaded: Sequence[Ware], positions: Dict[Ware,
     return [w.value for w in ordered[:2]]
 
 
-def best_share_to_buy(
+@dataclass
+class SharePurchase:
+    """The share the harbor master would buy, and what it's worth."""
+
+    ware: Ware
+    price: int
+    predicted_final_level: float
+
+    @property
+    def net_value(self) -> float:
+        """Expected gain from buying: what the ware should be worth at the
+        end, minus what the share costs today."""
+        return self.predicted_final_level - self.price
+
+
+def plan_share_purchase(
     model: ShareValueModel,
     state: GameState,
     favored_wares: Sequence[str],
-) -> Optional[Ware]:
-    """The ware whose share is worth buying now, or `None` if none of them
-    is: predicted final level minus what the share costs today, best first,
-    and nothing bought when even the best is a loss.
+) -> Optional[SharePurchase]:
+    """The purchase the harbor master would actually make, or `None` if no
+    available share is worth buying -- the best predicted final level minus
+    today's price, with nothing bought when even the best is a loss.
 
-    Only wares with shares still available are considered.
+    Only wares with shares still available are considered. This is the
+    single decision point: `best_share_to_buy` names the ware for callers
+    that just need to buy it, and `harbor_master` prices the bid off the
+    same result, so bidding and buying can't disagree about which share is
+    coming.
     """
-    best: Optional[Tuple[float, Ware]] = None
+    best: Optional[SharePurchase] = None
     for ware in Ware:
         if state.shares_available(ware) <= 0:
             continue
@@ -382,7 +401,22 @@ def best_share_to_buy(
             state.voyage_number,
             {w.value: v for w, v in state.black_market.values.items()},
         )
-        net = predicted - state.black_market.share_price(ware)
-        if net > 0 and (best is None or net > best[0]):
-            best = (net, ware)
-    return best[1] if best else None
+        candidate = SharePurchase(
+            ware=ware,
+            price=state.black_market.share_price(ware),
+            predicted_final_level=predicted,
+        )
+        if candidate.net_value > 0 and (best is None or candidate.net_value > best.net_value):
+            best = candidate
+    return best
+
+
+def best_share_to_buy(
+    model: ShareValueModel,
+    state: GameState,
+    favored_wares: Sequence[str],
+) -> Optional[Ware]:
+    """The ware whose share is worth buying now, or `None` -- see
+    `plan_share_purchase`, which this just names the ware from."""
+    plan = plan_share_purchase(model, state, favored_wares)
+    return plan.ware if plan is not None else None

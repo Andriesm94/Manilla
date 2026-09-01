@@ -4,18 +4,21 @@ decision, built on `manilla.engine.wealth` and `manilla.engine.beliefs`.
 Per the user, "is winning harbor master worth it, and how much should I
 bid" breaks into three separately-heuristic-driven value components:
 
-1. `share_buying_value` -- the harbor master's privilege of buying one
-   share at its current black-market price. Coupled with the harbor
-   master's own upcoming punt-loading choice (`best_punt_setup`): a
-   ware's chance of rising *this* voyage is the real dice-based arrival
-   probability of whatever punt position that choice assigns it, and 0
-   for the one ware left ashore (it isn't sailing this voyage at all).
-   On top of that probabilistic first step, per the user, every ware is
-   assumed to rise one further step later in the game regardless
-   (`_share_buying_values`) -- there will be many more voyages after this
-   one. Special case: while every ware is still at 0 (game start), there's
-   no signal to couple with punt positioning at all, so whichever share
-   gets bought is just assumed to be worth 20 eventually.
+1. The harbor master's privilege of buying one share at its current
+   black-market price. As of 2026-08-31 this is priced by the learned
+   model (`manilla.engine.share_model`) via `harbor_master_bid_context`,
+   which asks it for the *exact* purchase it would make against this
+   voyage's planned punt setup and values that purchase's net gain. So a
+   bidder knows precisely which share it is bidding for, and buying it
+   later cannot contradict the bid.
+
+   The older heuristic (`share_buying_value` / `_share_buying_values`) is
+   still here: it's the baseline the model was measured against, and it
+   documents the reasoning the model now does statistically -- a ware's
+   chance of rising *this* voyage is the real dice-based arrival
+   probability of whatever punt position the setup assigns it, 0 for the
+   ware left ashore, plus a flat assumed further rise later in the game.
+   Nothing in the live path calls it any more.
 2. `best_punt_setup` -- the harbor master's privilege of choosing which 3
    of 4 wares to load and their start positions. Valued exactly via dice
    probabilities, per the user: both the direct effect on ware-punt-
@@ -62,6 +65,7 @@ from manilla.engine.models import (
     SHARE_REPAY_AMOUNT,
     Ware,
 )
+from manilla.engine import share_model
 from manilla.engine.seat_value import seat_advantage
 from manilla.engine.wealth import action_impact, identify_rivals
 
@@ -430,6 +434,7 @@ def harbor_master_bid_context(
     beliefs: ShareBeliefs,
     my_id: str,
     p_safe_if_caught: Optional[Numeric] = None,
+    model: Optional["share_model.ShareValueModel"] = None,
 ) -> HarborMasterBidContext:
     """The board-dependent, bid-to-bid-stable pieces `decide_harbor_master_bid`
     needs -- `harbor_master_static_value`, the price of whichever share
@@ -457,19 +462,17 @@ def harbor_master_bid_context(
     figures identically -- leaving the genuine value of choosing well over
     choosing arbitrarily, which *is* directly comparable to a bid price.
 
-    The preferred share's price is the *most expensive* among every ware
-    tied for `share_buying_value`'s best score -- a defensible worst case
-    for an affordability check, matching the defensive framing
-    `wealth.DEFENSIVE_WEALTH_MARGIN` already uses elsewhere for opponents'
-    unknowns.
+    The share-buying component comes from the *same* decision the purchase
+    itself will make (`share_model.plan_share_purchase`, against the punt
+    setup already computed here), so bidding knows exactly which share it
+    is bidding for: its value is that purchase's net value, and the
+    preferred price is that ware's actual price rather than a worst case
+    over ties. These used to disagree -- bidding valued shares with the
+    heuristic while buying went through the model -- which meant a bot
+    could bid for one ware's prospects and then buy a different one.
 
-    Note this deliberately still values shares heuristically, while the
-    purchase it is anticipating now goes through the learned model
-    (`manilla.engine.share_model`): bidding was explicitly scoped to stay
-    hand-tuned, so the two can disagree about which ware is worth most. The
-    worst-case pricing above limits the damage -- the bid only needs the
-    cost of *a* share to be covered, not to name the same one -- but if
-    bidding is ever revisited, unifying them is the obvious first move.
+    `model` defaults to the shipped share model; pass one to bid against a
+    retrained or deliberately different valuation.
     """
     rivals = identify_rivals(state, beliefs, my_id, p_safe_if_caught)
 
@@ -480,14 +483,16 @@ def harbor_master_bid_context(
         state, beliefs, my_id, neutral_loaded, neutral_positions, rivals, p_safe_if_caught
     )
 
-    buying_values = _share_buying_values(state, beliefs, my_id, p_safe_if_caught, planned_punt_setup=best_candidate)
-    buying_value = max(buying_values.values(), default=Fraction(0))
+    purchase = share_model.plan_share_purchase(
+        model if model is not None else share_model.default_model(),
+        state,
+        share_model.favored_wares_from_setup(*best_candidate),
+    )
+    buying_value = (
+        Fraction(purchase.net_value).limit_denominator(10**6) if purchase is not None else Fraction(0)
+    )
+    preferred_share_price = purchase.price if purchase is not None else 0
     static_value = buying_value + (punt_setup_score - neutral_score)
-
-    preferred_share_price = 0
-    if buying_value > 0:
-        tied = [ware for ware, value in buying_values.items() if value == buying_value]
-        preferred_share_price = max(state.black_market.share_price(ware) for ware in tied)
 
     return HarborMasterBidContext(static_value, preferred_share_price, wares_loaded)
 

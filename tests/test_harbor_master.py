@@ -39,6 +39,7 @@ from manilla.engine.harbor_master import (
     punt_setup_candidates,
     share_buying_value,
 )
+from manilla.engine import share_model
 from manilla.engine.wealth import action_impact, identify_rivals
 
 
@@ -736,10 +737,49 @@ class TestHarborMasterStaticValue(unittest.TestCase):
             neutral_rise -= expected_black_market_rise_value(neutral_after, beliefs, rival_id)
         neutral_score = neutral_impact.total_rev_after + neutral_rise
 
-        expected = (
-            share_buying_value(state, beliefs, "p0", planned_punt_setup=best_candidate) + (punt_part - neutral_score)
+        # The share component is the learned model's *actual* planned
+        # purchase (net of price), not the old heuristic's best value --
+        # this is what stops bidding and buying naming different wares.
+        purchase = share_model.plan_share_purchase(
+            share_model.default_model(),
+            state,
+            share_model.favored_wares_from_setup(*best_candidate),
         )
+        share_part = Fraction(purchase.net_value).limit_denominator(10**6) if purchase else Fraction(0)
+
+        expected = share_part + (punt_part - neutral_score)
         self.assertEqual(harbor_master_static_value(state, beliefs, "p0"), expected)
+
+    def test_bid_context_prices_the_share_the_model_will_actually_buy(self):
+        """Regression against the two disagreeing: the price bidding
+        budgets for must be the price of the ware the purchase picks, not a
+        worst case over some other ranking's ties."""
+        state = _make_state()
+        for ware, level in zip(Ware, [0, 5, 10, 20]):
+            state.black_market.values[ware] = level
+        beliefs = infer_beliefs(state, "p0")
+        planned = best_punt_setup(state, beliefs, "p0")[0]
+
+        purchase = share_model.plan_share_purchase(
+            share_model.default_model(),
+            state,
+            share_model.favored_wares_from_setup(*planned),
+        )
+        context = harbor_master_bid_context(state, beliefs, "p0")
+
+        self.assertIsNotNone(purchase)
+        self.assertEqual(context.preferred_share_price, purchase.price)
+        self.assertEqual(context.preferred_share_price, state.black_market.share_price(purchase.ware))
+
+    def test_bid_context_prices_nothing_when_the_model_would_not_buy(self):
+        state = _make_state()
+        for player in state.players:
+            player.shares = []
+        for ware in Ware:  # every share cornered -- nothing left to buy
+            state.players[0].shares.extend(Share(ware=ware) for _ in range(SHARES_PER_WARE))
+        beliefs = infer_beliefs(state, "p0")
+
+        self.assertEqual(harbor_master_bid_context(state, beliefs, "p0").preferred_share_price, 0)
 
     def test_harbor_master_value_equals_static_plus_first_mover(self):
         state = _make_state()
