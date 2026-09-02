@@ -33,6 +33,12 @@ Three things to keep in mind when using or refreshing these numbers:
   the harbor master's most, since paying for the auction and the share is
   what makes anyone run short. `measure_seat_profit_means` refuses rows
   below v3 rather than averaging them in -- see `MIN_SCHEMA_VERSION`.
+
+  This was not a rounding error: correcting it cut the harbor master's
+  measured earnings by 7.53 pesos and left every other seat within 0.44.
+  Any future change to what counts as earnings deserves the same
+  suspicion, because the seat this bites is never the average one -- it's
+  whichever seat the change happens to correlate with.
 """
 
 from __future__ import annotations
@@ -46,21 +52,27 @@ from typing import Dict, Optional, Sequence, Tuple
 # Mean pesos earned by a seat's accomplices in one voyage, indexed by that
 # seat's offset from the harbor master (0 = the harbor master).
 #
-# Source: 14,108 four-player REV voyages across 2,324 games, measured
-# 2026-08-31 under bidding that already used the previous measurement.
-# Standard error about 0.09, clustered by game.
+# Source: 14,798 four-player REV voyages across 2,234 games, measured
+# 2026-09-02 under schema v3 -- the first figures where a mid-voyage
+# encumbrance is treated as the loan it is rather than as income. Standard
+# error 0.08-0.09, clustered by game.
 #
-# !! KNOWN TO BE INFLATED -- a v3 re-measurement is running. These rows
-# predate the encumbrance correction (see the third bullet above), so a
-# mid-voyage loan was counted as income. On 15,037 random-policy voyages
-# under the corrected rule, offset 0 fell from +8.96 to +5.10 while every
-# other seat moved by under 0.8 -- which all but erased the harbor
-# master's edge *under random bidding*. REV harbor masters bid harder and
-# so run short more often, so the correction plausibly bites at least as
-# hard here, but that hasn't been measured yet. Treat offset 0 as an
-# upper bound until a v3 REV run replaces these.
+# The encumbrance correction mattered enormously, and almost entirely to
+# the harbor master. Against the v2 figures these replace
+# (17.036 / 6.540 / 5.045 / 5.527), offset 0 fell by 7.53 while no other
+# seat moved by more than 0.44 -- roughly a hundred standard errors of
+# difference on a seat whose whole apparent edge was, in large part, the
+# loans it took to pay for the office. Paying for the auction and the
+# share is exactly what makes a player run short, so the harbor master
+# collected the phantom income nearly every voyage and nobody else did.
+#
+# What survives is a real but far smaller advantage: the office is worth
+# about 3.4-4.8 pesos over a later seat rather than 10.5-12.0. The shape is
+# unchanged -- a step at the harbor master, near-flat behind it, with
+# offset 3 still ahead of offset 2 -- so `first_mover_value` still reads a
+# table rather than scaling by distance. It just bids far less.
 MEASURED_SEAT_PROFIT: Dict[int, Tuple[float, ...]] = {
-    4: (17.036, 6.540, 5.045, 5.527),
+    4: (9.506, 6.141, 4.708, 5.094),
 }
 
 DEFAULT_DATA_PATH = Path("data") / "harbor_master_profit.jsonl"
