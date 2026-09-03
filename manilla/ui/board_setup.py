@@ -12,10 +12,11 @@ from __future__ import annotations
 import random
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable, List, Optional, Tuple
+from typing import Callable, Dict, List, Optional, Tuple
 
 from manilla.engine.models import (
     BLACK_MARKET_LEVELS,
+    DEAL_POOL_PER_WARE,
     GAME_END_VALUE,
     INSURANCE_SHIPYARD_COST,
     PLUNDER_PAYOUTS,
@@ -23,6 +24,7 @@ from manilla.engine.models import (
     SHARE_REPAY_AMOUNT,
     SHARES_PER_WARE,
     STARTING_CASH,
+    STARTING_SHARES_PER_PLAYER,
     AccompliceSlot,
     BlackMarket,
     GameState,
@@ -1817,19 +1819,97 @@ class BoardSetupApp(tk.Frame):
         SEAT_OPTIONS = [SEAT_HUMAN, SEAT_COMPUTER_RANDOM, SEAT_COMPUTER_REV]
         seat_vars: List[tk.StringVar] = []
 
+        # Hand-dealt setup: instead of shuffling the opening deal, say who got
+        # what. Every seat still gets exactly STARTING_SHARES_PER_PLAYER, and
+        # filling them in here doesn't reveal them -- the computers infer
+        # opponents' hands from public signals either way (engine.beliefs).
+        hand_deal_var = tk.BooleanVar(value=False)
+        hand_vars: List[List[tk.StringVar]] = []
+        WARE_LABELS = [w.value.title() for w in Ware]
+        avail_vars: Dict[Ware, tk.IntVar] = {w: tk.IntVar(value=SHARES_PER_WARE) for w in Ware}
+        # A ware stops tracking the dealt count once you set it by hand, so
+        # editing one number doesn't get silently undone by the next pick.
+        avail_touched: Dict[Ware, bool] = {w: False for w in Ware}
+        dealt_labels: Dict[Ware, ttk.Label] = {}
+        # Set while sync_available writes the spinboxes itself, so its own
+        # writes don't read back as the user having set them.
+        syncing = {"on": False}
+
         error_var = tk.StringVar(value="")
+
+        def dealt_hands() -> List[List[Ware]]:
+            return [[Ware(v.get().lower()) for v in seat] for seat in hand_vars]
+
+        def dealt_count(ware: Ware) -> int:
+            return sum(
+                1 for seat in hand_vars for v in seat if v.get().lower() == ware.value
+            )
+
+        def requested_available() -> Dict[Ware, int]:
+            out: Dict[Ware, int] = {}
+            for ware in Ware:
+                try:
+                    out[ware] = int(avail_vars[ware].get())
+                except (tk.TclError, ValueError):
+                    out[ware] = SHARES_PER_WARE - dealt_count(ware)
+            return out
+
+        def refresh_errors() -> None:
+            if not hand_deal_var.get():
+                error_var.set("")
+                return
+            error_var.set(
+                "; ".join(GameState.hand_deal_problems(dealt_hands(), requested_available()))
+            )
+
+        def sync_available(*_args) -> None:
+            """Keep untouched availability at what the rules imply: every
+            share not dealt out is put on the table (rules p.2)."""
+            syncing["on"] = True
+            try:
+                for ware in Ware:
+                    # Clamped so an over-dealt ware reports the deal itself as
+                    # the problem, rather than also complaining about a
+                    # negative stock that only exists as a consequence of it.
+                    spare = max(0, SHARES_PER_WARE - dealt_count(ware))
+                    if not avail_touched[ware]:
+                        avail_vars[ware].set(spare)
+                    dealt_labels[ware].configure(text=f"of {spare} not dealt out")
+            finally:
+                syncing["on"] = False
+            refresh_errors()
+
+        def on_stock_edited(ware: Ware) -> None:
+            # Watching the variable rather than the spinbox's `command`,
+            # which only fires for the little arrows: a number typed straight
+            # into the box has to count as set by hand too, or it would be
+            # quietly overwritten by the next change to a hand.
+            if syncing["on"]:
+                return
+            avail_touched[ware] = True
+            refresh_errors()
+
+        for _ware in Ware:
+            avail_vars[_ware].trace_add(
+                "write", lambda *_a, w=_ware: on_stock_edited(w)
+            )
 
         def rebuild_rows() -> None:
             for child in rows_frame.winfo_children():
                 child.destroy()
             color_vars.clear()
             seat_vars.clear()
+            hand_vars.clear()
             try:
                 count = int(count_var.get())
             except (tk.TclError, ValueError):
                 count = 4
             count = max(4, min(5, count))
             count_var.set(count)
+            # A legal default deal, so the dialog never opens on a setup it
+            # would reject: the pool holds DEAL_POOL_PER_WARE of each ware, so
+            # handing them out in order can't over-draw any one of them.
+            pool = [w for w in Ware for _ in range(DEAL_POOL_PER_WARE)]
             for i in range(count):
                 row = ttk.Frame(rows_frame)
                 row.pack(side=tk.TOP, fill=tk.X, pady=2)
@@ -1849,14 +1929,57 @@ class BoardSetupApp(tk.Frame):
                 seat_combo.pack(side=tk.LEFT, padx=(10, 0))
                 seat_vars.append(seat_var)
 
+                seat_hand: List[tk.StringVar] = []
+                for j in range(STARTING_SHARES_PER_PLAYER):
+                    ware_var = tk.StringVar(
+                        value=pool[i * STARTING_SHARES_PER_PLAYER + j].value.title()
+                    )
+                    ware_combo = ttk.Combobox(
+                        row, textvariable=ware_var, values=WARE_LABELS, width=9, state="readonly"
+                    )
+                    ware_combo.bind("<<ComboboxSelected>>", sync_available)
+                    seat_hand.append(ware_var)
+                    if hand_deal_var.get():
+                        ware_combo.pack(side=tk.LEFT, padx=(6, 0))
+                hand_vars.append(seat_hand)
+            sync_available()
+
         count_spin = ttk.Spinbox(dialog, from_=4, to=5, width=4, textvariable=count_var, command=rebuild_rows)
         count_spin.pack(anchor="w", padx=12)
         count_spin.bind("<Return>", lambda e: rebuild_rows())
         count_spin.bind("<FocusOut>", lambda e: rebuild_rows())
 
+        def toggle_hand_deal() -> None:
+            if hand_deal_var.get():
+                stock_frame.pack(fill=tk.X, padx=12, pady=(0, 8), after=rows_frame)
+            else:
+                stock_frame.pack_forget()
+            rebuild_rows()
+
+        ttk.Checkbutton(
+            dialog, text="Hand-deal shares", variable=hand_deal_var, command=toggle_hand_deal
+        ).pack(anchor="w", padx=12, pady=(8, 0))
+
         rows_frame.pack(fill=tk.X, padx=12, pady=8)
 
-        tk.Label(dialog, textvariable=error_var, fg="#b02a2a").pack(padx=12)
+        stock_frame = ttk.LabelFrame(dialog, text="Shares for sale")
+        for r, ware in enumerate(Ware):
+            ttk.Label(stock_frame, text=ware.value.title(), width=10).grid(
+                row=r, column=0, sticky="w", padx=(8, 4), pady=2
+            )
+            ttk.Spinbox(
+                stock_frame,
+                from_=0,
+                to=SHARES_PER_WARE,
+                width=4,
+                textvariable=avail_vars[ware],
+            ).grid(row=r, column=1, sticky="w")
+            dealt_labels[ware] = ttk.Label(stock_frame, text="")
+            dealt_labels[ware].grid(row=r, column=2, sticky="w", padx=(8, 8))
+
+        tk.Label(dialog, textvariable=error_var, fg="#b02a2a", wraplength=460, justify="left").pack(
+            padx=12
+        )
 
         def build_state() -> Optional[GameState]:
             colors = [v.get() for v in color_vars]
@@ -1864,7 +1987,18 @@ class BoardSetupApp(tk.Frame):
                 error_var.set("Each player needs a distinct color.")
                 return None
             names = [f"Player {i + 1}" for i in range(len(colors))]
-            state = GameState.new_default_game(names, colors=colors)
+            if hand_deal_var.get():
+                hands = dealt_hands()
+                available = requested_available()
+                problems = GameState.hand_deal_problems(hands, available)
+                if problems:
+                    error_var.set("; ".join(problems))
+                    return None
+                state = GameState.new_hand_dealt_game(
+                    names, hands, available=available, colors=colors
+                )
+            else:
+                state = GameState.new_default_game(names, colors=colors)
             for player, seat_var in zip(state.players, seat_vars):
                 seat = seat_var.get()
                 player.is_bot = seat != SEAT_HUMAN
@@ -1903,7 +2037,6 @@ class BoardSetupApp(tk.Frame):
         )
 
         rebuild_rows()
-
     def _show_auction_dialog(self) -> None:
         players = self.state_obj.players
         if not players:

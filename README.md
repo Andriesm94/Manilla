@@ -22,13 +22,19 @@ That opens the board window. Start a new game (3–5 players) and set each seat 
 Human, Computer (random), or Computer (REV); "Simulate" runs a whole game with all
 REV computers while you watch.
 
+Ticking **Hand-deal shares** in that dialog replaces the shuffled opening deal
+with one you type in — each seat's two shares, plus how many of each ware are
+for sale — for reproducing a position from a real table. Filling the hands in
+*sets* them without *revealing* them: the computers go on inferring opponents'
+holdings from public signals exactly as before.
+
 Run the tests with:
 
 ```bash
 python -m unittest discover -s tests
 ```
 
-376 tests covering the data model, the probability/EV/REV engine, the headless
+407 tests covering the data model, the probability/EV/REV engine, the headless
 self-play engine, the learned share-buying model, and UI-integration tests that
 drive the real Tkinter app.
 

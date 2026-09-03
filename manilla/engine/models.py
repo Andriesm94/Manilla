@@ -90,6 +90,10 @@ INSURANCE_SHIPYARD_COST: Dict[int, int] = {1: 6, 2: 14, 3: 29}
 STARTING_CASH = 30
 STARTING_SHARES_PER_PLAYER = 2
 SHARES_PER_WARE = 5
+# The opening deal is made from a shuffled pile of 3 of each ware, not from
+# all 20 shares (rules p.2, "Preparation"): whatever isn't dealt joins the
+# stock beside the board. So no ware can start with more than 3 in hands.
+DEAL_POOL_PER_WARE = 3
 SEA_ROUTE_LENGTH = 13  # spaces 0-13
 PUNT_START_SUM = 9
 MAX_START_SPACE = 5
@@ -334,6 +338,11 @@ class GameState:
     movement_round_index: int = 0
     current_turn_player_id: Optional[str] = None
     game_setup_confirmed: bool = False  # player count/colors locked once True
+    # Shares kept out of the purchasable stock entirely. Normally empty: the
+    # rules put every undealt share on the table, so availability is just
+    # `SHARES_PER_WARE - shares_owned`. A hand-dealt setup can override that,
+    # for boards where some shares are neither held nor for sale.
+    shares_withheld: Dict[Ware, int] = field(default_factory=dict)
 
     @property
     def player_count(self) -> int:
@@ -354,7 +363,8 @@ class GameState:
         return sum(1 for p in self.players for s in p.shares if s.ware == ware)
 
     def shares_available(self, ware: Ware) -> int:
-        return max(0, SHARES_PER_WARE - self.shares_owned(ware))
+        withheld = self.shares_withheld.get(ware, 0)
+        return max(0, SHARES_PER_WARE - self.shares_owned(ware) - withheld)
 
     def validate(self) -> List[str]:
         """Non-blocking sanity warnings, not hard rule enforcement."""
@@ -403,6 +413,12 @@ class GameState:
                 warnings.append(
                     f"{owned} {ware.value} shares are owned across all players, but only {SHARES_PER_WARE} exist."
                 )
+            withheld = self.shares_withheld.get(ware, 0)
+            if owned + withheld > SHARES_PER_WARE:
+                warnings.append(
+                    f"{owned} {ware.value} shares are held and {withheld} withheld, "
+                    f"which is more than the {SHARES_PER_WARE} that exist."
+                )
 
         return warnings
 
@@ -424,6 +440,7 @@ class GameState:
             "movement_round_index": self.movement_round_index,
             "current_turn_player_id": self.current_turn_player_id,
             "game_setup_confirmed": self.game_setup_confirmed,
+            "shares_withheld": {w.value: n for w, n in self.shares_withheld.items() if n},
         }
 
     @staticmethod
@@ -445,6 +462,7 @@ class GameState:
             movement_round_index=d["movement_round_index"],
             current_turn_player_id=d.get("current_turn_player_id"),
             game_setup_confirmed=d.get("game_setup_confirmed", False),
+            shares_withheld={Ware(k): n for k, n in d.get("shares_withheld", {}).items()},
         )
 
     def save(self, path: str) -> None:
@@ -499,3 +517,84 @@ class GameState:
             punts=punts,
             black_market=BlackMarket(),
         )
+
+    @staticmethod
+    def hand_deal_problems(
+        hands: List[List[Ware]], available: Optional[Dict[Ware, int]] = None
+    ) -> List[str]:
+        """Reasons `hands`/`available` couldn't be a real opening position.
+
+        Split out from `new_hand_dealt_game` so the setup dialog can show
+        these as you type instead of only when you press Confirm -- both go
+        through this one list, so the dialog can't drift from what the
+        factory will actually accept.
+        """
+        problems: List[str] = []
+        available = available or {}
+
+        for i, hand in enumerate(hands):
+            if len(hand) != STARTING_SHARES_PER_PLAYER:
+                problems.append(
+                    f"Player {i + 1} has {len(hand)} shares; every player starts with "
+                    f"{STARTING_SHARES_PER_PLAYER}."
+                )
+
+        for ware in Ware:
+            dealt = sum(1 for hand in hands for w in hand if w == ware)
+            if dealt > DEAL_POOL_PER_WARE:
+                problems.append(
+                    f"{dealt} {ware.value} shares are dealt, but the opening deal is made "
+                    f"from only {DEAL_POOL_PER_WARE} of each ware."
+                )
+            spare = SHARES_PER_WARE - dealt
+            asked = available.get(ware)
+            if asked is None:
+                continue
+            if asked < 0:
+                problems.append(f"Available {ware.value} shares can't be negative.")
+            elif asked > spare:
+                problems.append(
+                    f"{asked} {ware.value} shares can't be available: {dealt} of the "
+                    f"{SHARES_PER_WARE} are dealt out, leaving at most {spare}."
+                )
+
+        return problems
+
+    @staticmethod
+    def new_hand_dealt_game(
+        player_names: List[str],
+        hands: List[List[Ware]],
+        available: Optional[Dict[Ware, int]] = None,
+        colors: Optional[List[str]] = None,
+    ) -> "GameState":
+        """The documented starting setup, but with the opening deal specified
+        rather than shuffled -- for reproducing a position from a real table.
+
+        `available` is how many of each ware are for sale. Leave it out and it
+        follows the rules (everything undealt is on the table); give it, and
+        the difference is recorded in `shares_withheld`.
+
+        The hands are *set*, not *revealed*: nothing tells the computer players
+        who holds what, so they still infer opponents' hands from public
+        signals the same way (see `manilla.engine.beliefs`).
+        """
+        if len(hands) != len(player_names):
+            raise ValueError(
+                f"Got {len(hands)} hands for {len(player_names)} players."
+            )
+        problems = GameState.hand_deal_problems(hands, available)
+        if problems:
+            raise ValueError("; ".join(problems))
+
+        state = GameState.new_default_game(player_names, colors=colors)
+        for player, hand in zip(state.players, hands):
+            player.shares = [Share(ware=ware) for ware in hand]
+
+        if available is not None:
+            for ware in Ware:
+                dealt = sum(1 for hand in hands for w in hand if w == ware)
+                withheld = SHARES_PER_WARE - dealt - available.get(ware, SHARES_PER_WARE - dealt)
+                if withheld:
+                    state.shares_withheld[ware] = withheld
+
+        return state
