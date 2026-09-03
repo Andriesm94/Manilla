@@ -2102,23 +2102,51 @@ class BoardSetupApp(tk.Frame):
 
         ttk.Label(
             dialog,
-            text=f"{player.name} ({player.color}) may buy one share (price = the ware's current "
-            f"black market value, minimum 5 PESOS).",
-            wraplength=340,
-            justify=tk.LEFT,
+            text=f"{player.name} ({player.color}) may buy one share.",
             font=("Segoe UI", 10, "bold"),
-        ).pack(padx=12, pady=(12, 8))
+        ).pack(padx=12, pady=(12, 2), anchor="w")
+        ttk.Label(
+            dialog,
+            text=f"Cash: {player.cash} PESOS. Price is the ware's black market value, minimum 5.",
+            wraplength=380,
+            justify=tk.LEFT,
+        ).pack(padx=12, pady=(0, 8), anchor="w")
+
+        # Everything needed to make the decision, in one grid: what the
+        # market says, what's left to buy, and what this player already
+        # holds. Every ware is listed even when sold out -- a ware nobody
+        # can buy still matters, since its market value is what the
+        # shares already held are worth.
+        table = ttk.Frame(dialog)
+        table.pack(padx=12, pady=(0, 6), anchor="w")
+        for col, heading in enumerate(("Ware", "Market", "Price", "Available", "You hold")):
+            ttk.Label(table, text=heading, font=("Segoe UI", 9, "bold")).grid(
+                row=0, column=col, sticky="w", padx=(0, 14), pady=(0, 4)
+            )
 
         ware_var = tk.StringVar(value=available[0].value)
-        for ware in available:
-            price = market.share_price(ware)
+        for row, ware in enumerate(Ware, start=1):
             left = self.state_obj.shares_available(ware)
-            ttk.Radiobutton(
-                dialog,
-                text=f"{ware.value.title()} - {price} PESOS ({left} left)",
-                variable=ware_var,
-                value=ware.value,
-            ).pack(anchor="w", padx=12)
+            held = [s for s in player.shares if s.ware is ware]
+            encumbered = sum(1 for s in held if s.encumbered)
+
+            if left > 0:
+                selector = ttk.Radiobutton(
+                    table, text=ware.value.title(), variable=ware_var, value=ware.value
+                )
+            else:
+                # Sold out: shown for context, but not selectable.
+                selector = ttk.Label(table, text=f"  {ware.value.title()}", foreground="grey")
+            selector.grid(row=row, column=0, sticky="w", padx=(0, 14))
+
+            holding = str(len(held))
+            if encumbered:
+                holding += f" ({encumbered} encumbered)"
+            for col, value in enumerate(
+                (str(market.values[ware]), f"{market.share_price(ware)}", str(left), holding),
+                start=1,
+            ):
+                ttk.Label(table, text=value).grid(row=row, column=col, sticky="w", padx=(0, 14))
 
         def resolve() -> None:
             dialog.destroy()
