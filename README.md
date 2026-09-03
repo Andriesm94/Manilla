@@ -28,7 +28,7 @@ Run the tests with:
 python -m unittest discover -s tests
 ```
 
-354 tests covering the data model, the probability/EV/REV engine, the headless
+376 tests covering the data model, the probability/EV/REV engine, the headless
 self-play engine, the learned share-buying model, and UI-integration tests that
 drive the real Tkinter app.
 
@@ -62,10 +62,19 @@ drive the real Tkinter app.
   worth, which share to buy, how to load and position the punts, and how high to bid.
 - **`manilla/engine/seat_value.py`** — what each seat in the turn rotation is
   actually worth, measured from self-play rather than assumed. Replaced a random
-  0.5–2.0 coefficient that priced a later seat as linear in distance; the
-  measurement says it's a step, not a slope — the harbor master earns ~10.6 pesos
-  over the next seat, and every seat behind that is within about a peso of the
-  others (the last seat even beats the second-to-last).
+  0.5–2.0 coefficient that priced a later seat as linear in distance.
+
+  The measured shape turns out to depend on the player count, which is why this
+  is a lookup table rather than a formula:
+
+  | players | seat 0 | 1 | 2 | 3 | 4 |
+  |---|---|---|---|---|---|
+  | 4 | 9.51 | 6.14 | 4.71 | 5.09 | — |
+  | 5 | 7.84 | 4.14 | 3.35 | 2.89 | 2.22 |
+
+  Four players is a *step* — the harbor master ahead, the rest flat, and seat 3
+  even beating seat 2. Five is a clean *slope*. Fitting a curve to either would
+  have baked in whichever count was measured first.
 - **`manilla/engine/policy.py`** — `choose_accomplice_action`, the top-level "pick
   the best placement this turn" entry point.
 
@@ -99,12 +108,16 @@ drive the real Tkinter app.
   self-play rows, split by game rather than by row — every voyage in a game shares
   one label, so a row-wise split would score well by recognising the game.
 
+  Scored in pesos rather than ranking accuracy, since the real rule maximises
+  predicted level minus price: **+13.70 per voyage** against +10.76 for the
+  heuristic, +10.79 for random choice, and a +19.95 oracle.
+
   Worth knowing how it got here: built on share counts and the favoured punts
-  alone, it lost to the one-line heuristic "just buy the favoured ware" (0.412
-  against 0.430). Adding each ware's *current* market level — which bounds the
-  final one from below — took it to 0.606. The shipped coefficients are trained on
-  random-policy games and are provisional; retrain on REV rows once a run has
-  recorded them.
+  alone, it *lost* to the one-line heuristic "just buy the favoured ware". Adding
+  each ware's *current* market level — which bounds the final one from below —
+  is what made it work. Trained on 4- and 5-player games pooled, which was
+  checked rather than assumed: ware value transfers across player counts, even
+  though seat value emphatically doesn't.
 
 ## A note on the architecture
 
