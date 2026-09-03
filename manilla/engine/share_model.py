@@ -79,27 +79,36 @@ DEFAULT_DATA_PATH = Path("data") / "bid_buy_training.jsonl"
 # docstring for why that makes them unusable here rather than merely worse.
 MIN_SCHEMA_VERSION = 2
 
-# Trained on 10,548 four-player REV voyages (the training half of 14,108
-# across 2,324 games), 2026-08-31 -- the distribution these coefficients
-# will actually face, replacing a provisional fit on random-policy games.
+# Trained 2026-09-03 on 31,330 REV voyages (4,871 games) pooling four- and
+# five-player games. On held-out games: R^2 0.229, +13.70 pesos per voyage
+# against +10.76 for the favoured-ware heuristic, +10.79 for random choice,
+# and a +19.95 oracle.
 #
-# On held-out REV games this scores R^2 0.273 and picks the best ware 54.4%
-# of the time, against 42.9% for the "just buy the favoured ware" heuristic
-# and 29.2% for random choice. The earlier random-policy fit scored 0.208 /
-# 52.8% on the same held-out games -- so it transferred better than it had
-# any right to, which is decent evidence the relationship really is
-# structural, but training on the right distribution is still worth 1.6
-# points of accuracy.
+# **Pooling player counts is deliberate, and was checked rather than
+# assumed.** Nothing here takes player_count as a feature, so the question
+# is whether the ware-value relationship is the same in both. Trained on
+# one count and tested on the other:
+#
+#     trained 4p -> 5p test    R^2 0.227   (5p-native: 0.254)
+#     trained 5p -> 4p test    R^2 0.228   (4p-native: 0.235)
+#
+# A five-player-trained model actually scores *better* on four-player games
+# by net value (+14.06 against +13.91) than the four-player-native one. The
+# relationship transfers, so `load_rows` deliberately does not filter on
+# player_count -- more data wins. That is specific to this model: seat
+# values emphatically do *not* transfer between counts (see
+# `seat_value.MEASURED_SEAT_PROFIT`, where 4-player is a step and 5-player
+# a clean slope), so don't carry the finding across.
 DEFAULT_COEFFICIENTS: Tuple[float, ...] = (
-    6.5493,
-    -1.3943,
-    4.4272,
-    -0.6611,
-    1.2479,
-    0.3012,
-    1.0527,
-    -0.2267,
-    0.0511,
+    14.0845,
+    -1.1869,
+    4.2816,
+    0.0278,
+    0.4193,
+    0.0538,
+    1.0618,
+    -0.2478,
+    0.1148,
 )
 
 

@@ -36,12 +36,32 @@ class TestSeatProfitMeans(unittest.TestCase):
                 means = seat_profit_means(count)
                 self.assertTrue(all(means[0] > m for m in means[1:]))
 
-    def test_unmeasured_counts_are_flat_behind_the_harbor_master(self):
-        """Unmeasured player counts must not invent a per-seat slope --
-        the measurement says the gradient behind the harbor master is
-        essentially flat, so extrapolating one would be fiction."""
-        means = seat_profit_means(5)
+    def test_unmeasured_counts_fall_back_to_a_flat_placeholder(self):
+        """3 players has never been measured, so it gets a placeholder
+        rather than an estimate: the harbor master's figure, then one flat
+        value behind. Deliberately not a fitted shape -- the two counts we
+        *have* measured disagree about what the shape even is (4-player is
+        a step, 5-player a slope), so extrapolating either would be
+        fiction. See the module docstring."""
+        means = seat_profit_means(3)
         self.assertEqual(len(set(means[1:])), 1)
+
+    def test_measured_counts_keep_their_real_shape(self):
+        # 5-player really does decline monotonically across every seat --
+        # the fallback's flatness must not be applied to measured data.
+        means = seat_profit_means(5)
+        self.assertEqual(means, MEASURED_SEAT_PROFIT[5])
+        self.assertEqual(list(means), sorted(means, reverse=True))
+
+    def test_the_two_measured_counts_have_genuinely_different_shapes(self):
+        """Guards the claim the module docstring makes. 4-player is a step
+        (offset 3 beats offset 2); 5-player is a clean slope. If either
+        stops holding, the docstring is wrong and the fallback's rationale
+        with it."""
+        four = MEASURED_SEAT_PROFIT[4]
+        self.assertGreater(four[3], four[2])  # non-monotonic: the step
+        five = MEASURED_SEAT_PROFIT[5]
+        self.assertEqual(list(five), sorted(five, reverse=True))  # the slope
 
 
 class TestSeatAdvantage(unittest.TestCase):

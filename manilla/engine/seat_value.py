@@ -6,11 +6,30 @@ This replaces the hand-picked random first-mover coefficient that
 real self-play games via `selfplay_data.record_self_play_games`.
 
 The old model assumed the cost of sitting one spot further back was
-*linear* in distance. The measurement says it plainly isn't: the harbor
-master is clearly ahead, and every seat behind is within about a peso of
-the others, not even ordered monotonically. It's a step, not a slope --
-which is why `first_mover_value` looks the gap up in a table rather than
-multiplying by seat distance.
+*linear* in distance, with one coefficient for every game. Measurement
+killed the coefficient, and then killed the generalisation that replaced
+it:
+
+    4 players   9.506  6.141  4.708  5.094
+    5 players   7.837  4.136  3.348  2.888  2.223
+
+At four players it's a **step** -- the harbor master is clearly ahead, the
+seats behind sit within about 1.4 pesos of each other, and offset 3 even
+beats offset 2. At five it's a **slope** -- a clean monotonic decline
+across all five seats, with the last seat earning barely a quarter of the
+harbor master's.
+
+"It's a step, not a slope" was stated here as a general finding when only
+the 4-player data existed. It isn't general; it was a fact about one
+player count. Which is the case for reading the table rather than fitting
+any curve to it: `first_mover_value` looks the gap up per player count and
+per seat, so it doesn't need to know which regime it's in.
+
+An unmeasured player count still falls back to an approximation
+(`seat_profit_means`), and the 5-player measurement shows how weak that
+can be -- the fallback had predicted (9.506, 5.314, 5.314, 5.314, 5.314)
+against an actual (7.837, 4.136, 3.348, 2.888, 2.223), wrong in level and
+in shape. Treat any unmeasured count as a placeholder, not an estimate.
 
 Three things to keep in mind when using or refreshing these numbers:
 
@@ -71,8 +90,14 @@ from typing import Dict, Optional, Sequence, Tuple
 # unchanged -- a step at the harbor master, near-flat behind it, with
 # offset 3 still ahead of offset 2 -- so `first_mover_value` still reads a
 # table rather than scaling by distance. It just bids far less.
+# 5-player: 12,935 voyages across 1,937 games, measured 2026-09-03, se
+# 0.07-0.08. This one is *not* the same shape as the 4-player profile --
+# see the "step or slope" note in the module docstring. It also shows how
+# poor the fallback approximation was: it had guessed
+# (9.506, 5.314, 5.314, 5.314, 5.314), wrong in level and in shape.
 MEASURED_SEAT_PROFIT: Dict[int, Tuple[float, ...]] = {
     4: (9.506, 6.141, 4.708, 5.094),
+    5: (7.837, 4.136, 3.348, 2.888, 2.223),
 }
 
 DEFAULT_DATA_PATH = Path("data") / "harbor_master_profit.jsonl"
