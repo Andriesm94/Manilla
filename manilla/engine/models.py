@@ -103,15 +103,27 @@ BLACK_MARKET_LEVELS = [0, 5, 10, 20, 30]
 
 @dataclass
 class Share:
-    ware: Ware
+    """One share certificate. `ware` is None for a share the game state
+    knows a player holds but whose identity was never recorded -- a human
+    who hand-dealt without typing their hand in. The count is public either
+    way (rules p.8: an encumbered share is set aside *face-down*, so even
+    taking credit doesn't reveal it); the ware only has to be named at game
+    end, when everyone reveals to score."""
+
+    ware: Optional[Ware] = None
     encumbered: bool = False
 
+    @property
+    def is_recorded(self) -> bool:
+        return self.ware is not None
+
     def to_dict(self) -> dict:
-        return {"ware": self.ware.value, "encumbered": self.encumbered}
+        return {"ware": self.ware.value if self.ware else None, "encumbered": self.encumbered}
 
     @staticmethod
     def from_dict(d: dict) -> "Share":
-        return Share(ware=Ware(d["ware"]), encumbered=d["encumbered"])
+        ware = d.get("ware")
+        return Share(ware=Ware(ware) if ware else None, encumbered=d["encumbered"])
 
 
 @dataclass
@@ -338,11 +350,13 @@ class GameState:
     movement_round_index: int = 0
     current_turn_player_id: Optional[str] = None
     game_setup_confirmed: bool = False  # player count/colors locked once True
-    # Shares kept out of the purchasable stock entirely. Normally empty: the
-    # rules put every undealt share on the table, so availability is just
-    # `SHARES_PER_WARE - shares_owned`. A hand-dealt setup can override that,
-    # for boards where some shares are neither held nor for sale.
-    shares_withheld: Dict[Ware, int] = field(default_factory=dict)
+    # Shares held by a player whose hand was never recorded -- see `Share`.
+    # Normally empty, and then availability is just `SHARES_PER_WARE -
+    # shares_owned`, exactly as the rules imply (p.2: every undealt share
+    # goes on the table). When a hand is left unrecorded its shares are
+    # missing from `shares_owned`, so they are counted here instead: enough
+    # to keep the stock right, without attributing a ware to anybody.
+    unrecorded_holdings: Dict[Ware, int] = field(default_factory=dict)
 
     @property
     def player_count(self) -> int:
@@ -363,8 +377,30 @@ class GameState:
         return sum(1 for p in self.players for s in p.shares if s.ware == ware)
 
     def shares_available(self, ware: Ware) -> int:
-        withheld = self.shares_withheld.get(ware, 0)
-        return max(0, SHARES_PER_WARE - self.shares_owned(ware) - withheld)
+        unrecorded = self.unrecorded_holdings.get(ware, 0)
+        return max(0, SHARES_PER_WARE - self.shares_owned(ware) - unrecorded)
+
+    def unrecorded_share_count(self) -> int:
+        """How many held shares have no ware recorded, across all players."""
+        return sum(1 for p in self.players for s in p.shares if not s.is_recorded)
+
+    def record_share_identity(self, share: Share, ware: Ware) -> None:
+        """Name a share that was being held unrecorded -- at game end, when
+        the rules have everyone reveal to score.
+
+        Moving it out of `unrecorded_holdings` as it lands in `shares_owned`
+        is what keeps `shares_available` unchanged: revealing a share you
+        already held doesn't put anything back on the table."""
+        if share.is_recorded:
+            raise ValueError("That share's ware is already recorded.")
+        if self.unrecorded_holdings.get(ware, 0) <= 0:
+            raise ValueError(
+                f"No unrecorded {ware.value} share is outstanding to name."
+            )
+        share.ware = ware
+        self.unrecorded_holdings[ware] -= 1
+        if self.unrecorded_holdings[ware] == 0:
+            del self.unrecorded_holdings[ware]
 
     def validate(self) -> List[str]:
         """Non-blocking sanity warnings, not hard rule enforcement."""
@@ -413,12 +449,18 @@ class GameState:
                 warnings.append(
                     f"{owned} {ware.value} shares are owned across all players, but only {SHARES_PER_WARE} exist."
                 )
-            withheld = self.shares_withheld.get(ware, 0)
-            if owned + withheld > SHARES_PER_WARE:
+            unrecorded = self.unrecorded_holdings.get(ware, 0)
+            if owned + unrecorded > SHARES_PER_WARE:
                 warnings.append(
-                    f"{owned} {ware.value} shares are held and {withheld} withheld, "
+                    f"{owned} {ware.value} shares are recorded and {unrecorded} unrecorded, "
                     f"which is more than the {SHARES_PER_WARE} that exist."
                 )
+        outstanding = sum(self.unrecorded_holdings.values())
+        if outstanding != self.unrecorded_share_count():
+            warnings.append(
+                f"{outstanding} shares are held unrecorded by ware, but "
+                f"{self.unrecorded_share_count()} unnamed shares are in hands."
+            )
 
         return warnings
 
@@ -440,7 +482,9 @@ class GameState:
             "movement_round_index": self.movement_round_index,
             "current_turn_player_id": self.current_turn_player_id,
             "game_setup_confirmed": self.game_setup_confirmed,
-            "shares_withheld": {w.value: n for w, n in self.shares_withheld.items() if n},
+            "unrecorded_holdings": {
+                w.value: n for w, n in self.unrecorded_holdings.items() if n
+            },
         }
 
     @staticmethod
@@ -462,7 +506,9 @@ class GameState:
             movement_round_index=d["movement_round_index"],
             current_turn_player_id=d.get("current_turn_player_id"),
             game_setup_confirmed=d.get("game_setup_confirmed", False),
-            shares_withheld={Ware(k): n for k, n in d.get("shares_withheld", {}).items()},
+            unrecorded_holdings={
+                Ware(k): n for k, n in d.get("unrecorded_holdings", {}).items()
+            },
         )
 
     def save(self, path: str) -> None:
@@ -520,9 +566,15 @@ class GameState:
 
     @staticmethod
     def hand_deal_problems(
-        hands: List[List[Ware]], available: Optional[Dict[Ware, int]] = None
+        hands: List[Optional[List[Ware]]], available: Optional[Dict[Ware, int]] = None
     ) -> List[str]:
         """Reasons `hands`/`available` couldn't be a real opening position.
+
+        A `None` hand is a seat that didn't say what it was dealt -- a human
+        who would rather not tell the game state. Those two shares still
+        exist and still came off the table, so what makes the position add
+        up is the stock: whatever isn't dealt and isn't for sale has to be
+        exactly the unrecorded hands, no more and no less.
 
         Split out from `new_hand_dealt_game` so the setup dialog can show
         these as you type instead of only when you press Confirm -- both go
@@ -530,32 +582,76 @@ class GameState:
         factory will actually accept.
         """
         problems: List[str] = []
-        available = available or {}
+        unrecorded_seats = sum(1 for hand in hands if hand is None)
+        recorded = [hand for hand in hands if hand is not None]
 
         for i, hand in enumerate(hands):
-            if len(hand) != STARTING_SHARES_PER_PLAYER:
+            if hand is not None and len(hand) != STARTING_SHARES_PER_PLAYER:
                 problems.append(
                     f"Player {i + 1} has {len(hand)} shares; every player starts with "
                     f"{STARTING_SHARES_PER_PLAYER}."
                 )
 
+        if available is None:
+            if unrecorded_seats:
+                problems.append(
+                    "With a hand left unrecorded, how many of each ware are for sale "
+                    "has to be filled in -- it's the only thing left that says where "
+                    "those shares went."
+                )
+            available = {}
+
+        hidden_total = 0
         for ware in Ware:
-            dealt = sum(1 for hand in hands for w in hand if w == ware)
+            dealt = sum(1 for hand in recorded for w in hand if w == ware)
+            # Checked before anything to do with the stock, so an over-dealt
+            # ware reports the deal itself rather than the negative stock
+            # that is only a consequence of it.
             if dealt > DEAL_POOL_PER_WARE:
                 problems.append(
-                    f"{dealt} {ware.value} shares are dealt, but the opening deal is made "
-                    f"from only {DEAL_POOL_PER_WARE} of each ware."
+                    f"{dealt} {ware.value} shares are dealt, but the opening deal is "
+                    f"made from only {DEAL_POOL_PER_WARE} of each ware."
                 )
-            spare = SHARES_PER_WARE - dealt
-            asked = available.get(ware)
-            if asked is None:
                 continue
+            spare = SHARES_PER_WARE - dealt
+            asked = available.get(ware, spare)
             if asked < 0:
                 problems.append(f"Available {ware.value} shares can't be negative.")
-            elif asked > spare:
+                continue
+            if asked > spare:
                 problems.append(
                     f"{asked} {ware.value} shares can't be available: {dealt} of the "
                     f"{SHARES_PER_WARE} are dealt out, leaving at most {spare}."
+                )
+                continue
+            hidden = spare - asked
+            hidden_total += hidden
+            # The deal comes off a pile of DEAL_POOL_PER_WARE of each ware,
+            # so this bounds the recorded and unrecorded hands together.
+            if dealt + hidden > DEAL_POOL_PER_WARE:
+                problems.append(
+                    f"{dealt + hidden} {ware.value} shares would be in hands, but the "
+                    f"opening deal is made from only {DEAL_POOL_PER_WARE} of each ware."
+                )
+
+        expected_hidden = unrecorded_seats * STARTING_SHARES_PER_PLAYER
+        if not problems and hidden_total != expected_hidden:
+            if unrecorded_seats == 0:
+                problems.append(
+                    f"{hidden_total} shares are neither dealt out nor for sale, but "
+                    f"every hand is recorded, so there is nowhere for them to be."
+                )
+            else:
+                short = expected_hidden - hidden_total
+                seats = "hand holds" if unrecorded_seats == 1 else "hands hold"
+                problems.append(
+                    f"{unrecorded_seats} unrecorded {seats} {expected_hidden} shares, "
+                    f"but {hidden_total} are unaccounted for: "
+                    + (
+                        f"take {short} more off the shares for sale."
+                        if short > 0
+                        else f"put {-short} back on the shares for sale."
+                    )
                 )
 
         return problems
@@ -563,20 +659,24 @@ class GameState:
     @staticmethod
     def new_hand_dealt_game(
         player_names: List[str],
-        hands: List[List[Ware]],
+        hands: List[Optional[List[Ware]]],
         available: Optional[Dict[Ware, int]] = None,
         colors: Optional[List[str]] = None,
     ) -> "GameState":
         """The documented starting setup, but with the opening deal specified
         rather than shuffled -- for reproducing a position from a real table.
 
-        `available` is how many of each ware are for sale. Leave it out and it
-        follows the rules (everything undealt is on the table); give it, and
-        the difference is recorded in `shares_withheld`.
+        A `None` hand means that seat's shares stay unrecorded: they're
+        counted in `unrecorded_holdings` from the stock numbers instead of
+        being attributed to anyone, and named only at game end.
 
-        The hands are *set*, not *revealed*: nothing tells the computer players
-        who holds what, so they still infer opponents' hands from public
-        signals the same way (see `manilla.engine.beliefs`).
+        `available` is how many of each ware are for sale. It can be left out
+        only when every hand is recorded, in which case it follows the rules
+        (everything undealt is on the table).
+
+        Recorded hands are *set*, not *revealed*: nothing tells the computer
+        players who holds what, so they still infer opponents' hands from
+        public signals the same way (see `manilla.engine.beliefs`).
         """
         if len(hands) != len(player_names):
             raise ValueError(
@@ -588,13 +688,18 @@ class GameState:
 
         state = GameState.new_default_game(player_names, colors=colors)
         for player, hand in zip(state.players, hands):
-            player.shares = [Share(ware=ware) for ware in hand]
+            if hand is None:
+                player.shares = [Share() for _ in range(STARTING_SHARES_PER_PLAYER)]
+            else:
+                player.shares = [Share(ware=ware) for ware in hand]
 
         if available is not None:
             for ware in Ware:
-                dealt = sum(1 for hand in hands for w in hand if w == ware)
-                withheld = SHARES_PER_WARE - dealt - available.get(ware, SHARES_PER_WARE - dealt)
-                if withheld:
-                    state.shares_withheld[ware] = withheld
+                dealt = sum(
+                    1 for hand in hands if hand for w in hand if w == ware
+                )
+                hidden = SHARES_PER_WARE - dealt - available.get(ware, SHARES_PER_WARE - dealt)
+                if hidden:
+                    state.unrecorded_holdings[ware] = hidden
 
         return state

@@ -727,7 +727,11 @@ class BoardSetupApp(tk.Frame):
         for share in shares:
             ttk.Button(
                 dialog,
-                text=f"Encumber a {share.ware.value.title()} share (+{SHARE_LOAN_AMOUNT})",
+                text=(
+                    f"Encumber a {share.ware.value.title()} share (+{SHARE_LOAN_AMOUNT})"
+                    if share.is_recorded
+                    else f"Encumber an unrecorded share (+{SHARE_LOAN_AMOUNT})"
+                ),
                 command=lambda s=share: pick(s),
             ).pack(padx=12, pady=2, fill=tk.X)
 
@@ -1831,18 +1835,34 @@ class BoardSetupApp(tk.Frame):
         # editing one number doesn't get silently undone by the next pick.
         avail_touched: Dict[Ware, bool] = {w: False for w in Ware}
         dealt_labels: Dict[Ware, ttk.Label] = {}
+        hand_widgets: List[Dict[str, object]] = []
         # Set while sync_available writes the spinboxes itself, so its own
         # writes don't read back as the user having set them.
         syncing = {"on": False}
 
         error_var = tk.StringVar(value="")
 
-        def dealt_hands() -> List[List[Ware]]:
-            return [[Ware(v.get().lower()) for v in seat] for seat in hand_vars]
+        def records_hand(index: int) -> bool:
+            """Computers say what they were dealt; a human doesn't have to.
+
+            Their two shares still exist and still came off the table, so
+            the stock numbers are what account for them -- see
+            `GameState.hand_deal_problems`."""
+            return seat_vars[index].get() != SEAT_HUMAN
+
+        def dealt_hands() -> List[Optional[List[Ware]]]:
+            return [
+                [Ware(v.get().lower()) for v in seat] if records_hand(i) else None
+                for i, seat in enumerate(hand_vars)
+            ]
 
         def dealt_count(ware: Ware) -> int:
             return sum(
-                1 for seat in hand_vars for v in seat if v.get().lower() == ware.value
+                1
+                for i, seat in enumerate(hand_vars)
+                if records_hand(i)
+                for v in seat
+                if v.get().lower() == ware.value
             )
 
         def requested_available() -> Dict[Ware, int]:
@@ -1894,12 +1914,29 @@ class BoardSetupApp(tk.Frame):
                 "write", lambda *_a, w=_ware: on_stock_edited(w)
             )
 
+        def refresh_hand_widgets() -> None:
+            """Show the ware pickers only where a hand is being recorded --
+            hand-dealing switched on, and the seat not a human."""
+            for i, entry in enumerate(hand_widgets):
+                recording = hand_deal_var.get() and records_hand(i)
+                for combo in entry["combos"]:
+                    if recording:
+                        combo.pack(side=tk.LEFT, padx=(6, 0))
+                    else:
+                        combo.pack_forget()
+                if hand_deal_var.get() and not recording:
+                    entry["note"].pack(side=tk.LEFT, padx=(6, 0))
+                else:
+                    entry["note"].pack_forget()
+            sync_available()
+
         def rebuild_rows() -> None:
             for child in rows_frame.winfo_children():
                 child.destroy()
             color_vars.clear()
             seat_vars.clear()
             hand_vars.clear()
+            hand_widgets.clear()
             try:
                 count = int(count_var.get())
             except (tk.TclError, ValueError):
@@ -1929,7 +1966,10 @@ class BoardSetupApp(tk.Frame):
                 seat_combo.pack(side=tk.LEFT, padx=(10, 0))
                 seat_vars.append(seat_var)
 
+                seat_combo.bind("<<ComboboxSelected>>", lambda _e: refresh_hand_widgets())
+
                 seat_hand: List[tk.StringVar] = []
+                combos: List[ttk.Combobox] = []
                 for j in range(STARTING_SHARES_PER_PLAYER):
                     ware_var = tk.StringVar(
                         value=pool[i * STARTING_SHARES_PER_PLAYER + j].value.title()
@@ -1939,10 +1979,17 @@ class BoardSetupApp(tk.Frame):
                     )
                     ware_combo.bind("<<ComboboxSelected>>", sync_available)
                     seat_hand.append(ware_var)
-                    if hand_deal_var.get():
-                        ware_combo.pack(side=tk.LEFT, padx=(6, 0))
+                    combos.append(ware_combo)
                 hand_vars.append(seat_hand)
-            sync_available()
+                hand_widgets.append(
+                    {
+                        "combos": combos,
+                        "note": ttk.Label(
+                            row, text="shares not recorded", foreground="grey"
+                        ),
+                    }
+                )
+            refresh_hand_widgets()
 
         count_spin = ttk.Spinbox(dialog, from_=4, to=5, width=4, textvariable=count_var, command=rebuild_rows)
         count_spin.pack(anchor="w", padx=12)
@@ -2019,11 +2066,13 @@ class BoardSetupApp(tk.Frame):
         def on_simulate_all_bots() -> None:
             for seat_var in seat_vars:
                 seat_var.set(SEAT_COMPUTER_RANDOM)
+            refresh_hand_widgets()
             on_confirm()
 
         def on_simulate_all_rev_bots() -> None:
             for seat_var in seat_vars:
                 seat_var.set(SEAT_COMPUTER_REV)
+            refresh_hand_widgets()
             on_confirm()
 
         btn_row = ttk.Frame(dialog)
@@ -2280,6 +2329,18 @@ class BoardSetupApp(tk.Frame):
                 start=1,
             ):
                 ttk.Label(table, text=value).grid(row=row, column=col, sticky="w", padx=(0, 14))
+
+        # "You hold" can only count shares the game state knows the ware of.
+        # Say so rather than letting a hand-dealt human read their own row as
+        # empty -- "Available" is unaffected, since it comes off the stock.
+        unrecorded = sum(1 for s in player.shares if not s.is_recorded)
+        if unrecorded:
+            word = "share" if unrecorded == 1 else "shares"
+            ttk.Label(
+                dialog,
+                text=f"Not counted above: {unrecorded} {word} you never recorded.",
+                foreground="grey",
+            ).pack(padx=12, anchor="w")
 
         def resolve() -> None:
             dialog.destroy()
@@ -2541,7 +2602,13 @@ class BoardSetupApp(tk.Frame):
         cash = player.cash
         remaining = cash
 
-        by_value_desc = sorted(player.encumbered_shares, key=lambda s: market.values[s.ware], reverse=True)
+        # An unrecorded share has no ware to value. `_show_game_over_dialog`
+        # reveals every hand before it scores anything, so this only bites if
+        # a fortune is computed mid-game -- worth 0 there rather than a crash.
+        def value_of(share: Share) -> int:
+            return market.values[share.ware] if share.is_recorded else 0
+
+        by_value_desc = sorted(player.encumbered_shares, key=value_of, reverse=True)
         paid_off = []
         for share in by_value_desc:
             if remaining < SHARE_REPAY_AMOUNT:
@@ -2551,12 +2618,84 @@ class BoardSetupApp(tk.Frame):
 
         unencumbered_cost = cash - remaining
         counted_shares = player.unencumbered_shares + paid_off
-        shares_value = sum(market.values[s.ware] for s in counted_shares)
+        shares_value = sum(value_of(s) for s in counted_shares)
         total = remaining + shares_value
         forfeited = len(player.encumbered_shares) - len(paid_off)
         return cash, unencumbered_cost, shares_value, total, forfeited
 
+    def _reveal_unrecorded_shares(self, player: Player) -> None:
+        """Ask which wares `player`'s unrecorded shares were.
+
+        This is the one moment the identities have to surface: the rules keep
+        a hand secret all game -- even an encumbered share is set aside
+        face-down (p.8) -- but at game end "each player counts his cash and
+        adds to this the value of his shares", which can't be done without
+        naming them.
+
+        The choices are limited to wares still outstanding in
+        `unrecorded_holdings`, so the reveal can only produce a hand that the
+        stock said was possible all along.
+        """
+        unrecorded = [s for s in player.shares if not s.is_recorded]
+        if not unrecorded:
+            return
+
+        dialog = tk.Toplevel(self.winfo_toplevel())
+        dialog.title(f"{player.name}: reveal shares")
+        dialog.transient(self.winfo_toplevel())
+        dialog.grab_set()
+        dialog.resizable(False, False)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: None)  # scoring needs an answer
+
+        ttk.Label(
+            dialog,
+            text=f"{player.name} ({player.color}) never recorded "
+            f"{len(unrecorded)} of their shares.\n"
+            "Name them now so they can be scored.",
+            justify=tk.LEFT,
+            font=("Segoe UI", 10, "bold"),
+        ).pack(padx=12, pady=(12, 8), anchor="w")
+
+        outstanding = dict(self.state_obj.unrecorded_holdings)
+        choices = [w.value.title() for w in Ware if outstanding.get(w, 0) > 0]
+        pickers: List[tk.StringVar] = []
+        for i, share in enumerate(unrecorded):
+            row = ttk.Frame(dialog)
+            row.pack(fill=tk.X, padx=12, pady=2)
+            label = "encumbered share" if share.encumbered else "share"
+            ttk.Label(row, text=f"{label.title()} {i + 1}:", width=20).pack(side=tk.LEFT)
+            var = tk.StringVar(value=choices[0] if choices else "")
+            ttk.Combobox(
+                row, textvariable=var, values=choices, width=10, state="readonly"
+            ).pack(side=tk.LEFT)
+            pickers.append(var)
+
+        error_var = tk.StringVar(value="")
+        tk.Label(dialog, textvariable=error_var, fg="#b02a2a", wraplength=320, justify=tk.LEFT).pack(
+            padx=12
+        )
+
+        def on_ok() -> None:
+            picked = [Ware(v.get().lower()) for v in pickers]
+            for ware in set(picked):
+                if picked.count(ware) > outstanding.get(ware, 0):
+                    error_var.set(
+                        f"Only {outstanding.get(ware, 0)} {ware.value} shares are "
+                        f"unaccounted for, so they can't all be {ware.value}."
+                    )
+                    return
+            for share, ware in zip(unrecorded, picked):
+                self.state_obj.record_share_identity(share, ware)
+            dialog.destroy()
+
+        ttk.Button(dialog, text="Reveal", command=on_ok).pack(pady=(4, 12))
+        self.wait_window(dialog)
+
     def _show_game_over_dialog(self) -> None:
+        # Hidden hands have to be named before anything can be scored.
+        for player in self.state_obj.players:
+            self._reveal_unrecorded_shares(player)
+
         dialog = tk.Toplevel(self.winfo_toplevel())
         dialog.title("Game Over - Final Standings")
         dialog.transient(self.winfo_toplevel())
@@ -2714,6 +2853,19 @@ class BoardSetupApp(tk.Frame):
             unenc = sum(1 for s in player.shares if s.ware == ware and not s.encumbered)
             enc = sum(1 for s in player.shares if s.ware == ware and s.encumbered)
             ttk.Label(wrow, text=f"{unenc} / {enc}", width=6).pack(side=tk.LEFT, padx=2)
+
+        # A hand-dealt human never told the game state what they hold, so
+        # their shares can't be split by ware -- showing them as zeros would
+        # read as "holds nothing" (rules p.8: identities surface at game end).
+        unrecorded = [s for s in player.shares if not s.is_recorded]
+        if unrecorded:
+            urow = ttk.Frame(right_col)
+            urow.pack(side=tk.TOP, fill=tk.X)
+            ttk.Label(urow, text="Unrec.", width=7, foreground="grey").pack(side=tk.LEFT)
+            u_enc = sum(1 for s in unrecorded if s.encumbered)
+            ttk.Label(
+                urow, text=f"{len(unrecorded) - u_enc} / {u_enc}", width=6, foreground="grey"
+            ).pack(side=tk.LEFT, padx=2)
 
         name_row = ttk.Frame(card)
         name_row.pack(side=tk.TOP, fill=tk.X, pady=2)

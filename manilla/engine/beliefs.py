@@ -94,7 +94,11 @@ def infer_beliefs(state: GameState, viewer_id: str, signals: Iterable[ShareSigna
     if viewer is not None:
         tally: Dict[Ware, int] = {}
         for share in viewer.shares:
-            tally[share.ware] = tally.get(share.ware, 0) + 1
+            # An unrecorded share (a hand-dealt human's) has no ware to
+            # confirm: it stays in the secret pool like anyone else's, which
+            # is also where `state.unrecorded_holdings` puts it.
+            if share.ware is not None:
+                tally[share.ware] = tally.get(share.ware, 0) + 1
         beliefs.confirmed[viewer_id] = tally
 
     share_counts = {p.id: len(p.shares) for p in state.players}
@@ -114,13 +118,21 @@ def infer_beliefs(state: GameState, viewer_id: str, signals: Iterable[ShareSigna
 def secret_pool(state: GameState, beliefs: ShareBeliefs) -> Dict[Ware, int]:
     """How many shares of each ware are known to exist (from the public
     `shares_owned` totals) but aren't yet confirmed to any specific
-    player."""
+    player.
+
+    `unrecorded_holdings` counts here too. Those shares are just as public
+    as any other -- they're missing from the stock beside the board, which
+    is what makes them known to exist -- they simply aren't attributed to a
+    player in the game state. Leaving them out would shrink the pool below
+    the number of unknown slots it has to cover, and every unidentified
+    share would come out mispriced."""
     pool: Dict[Ware, int] = {}
     for ware in Ware:
         confirmed_total = sum(
             beliefs.confirmed_count(player_id, ware) for player_id in beliefs.confirmed
         )
-        pool[ware] = max(0, state.shares_owned(ware) - confirmed_total)
+        held = state.shares_owned(ware) + state.unrecorded_holdings.get(ware, 0)
+        pool[ware] = max(0, held - confirmed_total)
     return pool
 
 

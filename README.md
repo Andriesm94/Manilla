@@ -23,10 +23,19 @@ Human, Computer (random), or Computer (REV); "Simulate" runs a whole game with a
 REV computers while you watch.
 
 Ticking **Hand-deal shares** in that dialog replaces the shuffled opening deal
-with one you type in — each seat's two shares, plus how many of each ware are
-for sale — for reproducing a position from a real table. Filling the hands in
-*sets* them without *revealing* them: the computers go on inferring opponents'
-holdings from public signals exactly as before.
+with one you type in, for reproducing a position from a real table. Computer
+seats say what they were dealt; a human seat doesn't have to, and its two
+shares are held *unrecorded* — counted, but with no ware attached.
+
+What makes such a position add up is the stock, which you also fill in: every
+share that is neither dealt out nor for sale has to be in an unrecorded hand,
+exactly. That accounting is the whole reason the stock is an input rather than
+something derived (rules p.2 would otherwise pin it at "everything undealt").
+
+Filling a hand in *sets* it without *revealing* it — the computers go on
+inferring opponents' holdings from public signals — and the hidden ones stay
+hidden until the rules call for them: an encumbered share is set aside
+face-down (p.8), so only game-end scoring asks for the names.
 
 Run the tests with:
 
@@ -34,7 +43,7 @@ Run the tests with:
 python -m unittest discover -s tests
 ```
 
-407 tests covering the data model, the probability/EV/REV engine, the headless
+434 tests covering the data model, the probability/EV/REV engine, the headless
 self-play engine, the learned share-buying model, and UI-integration tests that
 drive the real Tkinter app.
 
