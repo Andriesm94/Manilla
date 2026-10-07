@@ -15,7 +15,7 @@ any of them clears zero. Framing it this way means every row in
 the model stays interpretable -- you can ask it what it thinks jade will
 be worth, and check that against a real game.
 
-**Ridge, solved directly.** Ordinary least squares plus a small penalty on
+**Ridge, solved directly.** Ordinary least squares plus a penalty on
 the coefficients, solved through the normal equations with Gaussian
 elimination -- a handful of features means the matrix is tiny, so there's
 no need for an iterative optimiser or an external library. The penalty
@@ -24,6 +24,11 @@ share count both track how attractive it looks), which makes unpenalised
 OLS coefficients jumpy without changing predictions much. The bias term is
 deliberately left unpenalised: shrinking it would just bias every
 prediction toward zero.
+
+The penalty is not small, and that's a choice made on decision quality,
+not fit -- see `DEFAULT_ALPHA`. Features are deliberately left
+unstandardised, so the penalty bites hardest on the small-scale ones (the
+0/1 `is_favored` flag above all), which is where the gain comes from.
 
 **Splitting by game, not by row.** Every voyage in one game carries the
 *same* label -- that game's final black market -- so rows from a game are
@@ -65,9 +70,7 @@ FEATURE_NAMES: Tuple[str, ...] = (
     "bias",
     "shares_in_play",
     "is_favored",
-    "voyage_number",
     "total_shares_in_play",
-    "favored_x_shares",
     "black_market",
     "total_black_market",
     "black_market_x_favored",
@@ -79,10 +82,40 @@ DEFAULT_DATA_PATH = Path("data") / "bid_buy_training.jsonl"
 # docstring for why that makes them unusable here rather than merely worse.
 MIN_SCHEMA_VERSION = 2
 
+# Chosen 2026-10-07 by 5-fold cross-validation within the training games
+# (grouped by game, alpha rescaled to fold size), scored on net pesos per
+# voyage rather than R^2 -- the buying rule only needs the *ranking* of
+# predicted-level-minus-price, and the two disagree here. Against alpha 1:
+#
+#     alpha     1000   2000   5000   10000  20000  50000
+#     CV gain   +0.00  +0.12  +0.12  +0.25  +0.25  +0.17   pesos/voyage
+#
+# 10000 won in all five folds (+0.19 to +0.35) and tied 20000; the smaller
+# was kept since it costs less fit. On held-out games R^2 drops 0.2288 ->
+# 0.2264 while net value rises +13.70 -> +13.93 (paired, game-clustered:
+# +0.23 +/- 0.04). Mechanically, shrinkage moves weight off `is_favored`
+# (+4.42 -> +2.62) onto `black_market_x_favored` (+0.12 -> +0.25): being
+# favoured still counts, but more of that now depends on the current level.
+#
+# Below ~1000 the penalty does nothing at all at this data size. Alpha is
+# absolute, not per-row, so retraining on a much larger or smaller dataset
+# should rescale it (alpha * new_rows / 31,330) or re-run the search.
+DEFAULT_ALPHA = 10000.0
+
 # Trained 2026-09-03 on 31,330 REV voyages (4,871 games) pooling four- and
-# five-player games. On held-out games: R^2 0.229, +13.70 pesos per voyage
-# against +10.76 for the favoured-ware heuristic, +10.79 for random choice,
-# and a +19.95 oracle.
+# five-player games, refitted 2026-10-07 at `DEFAULT_ALPHA`. On held-out
+# games: R^2 0.226, +13.93 pesos per voyage against +10.76 for the
+# favoured-ware heuristic, +10.79 for random choice, and a +19.95 oracle.
+# (The alpha-1 fit scored R^2 0.229 / +13.70; see `DEFAULT_ALPHA`.)
+#
+# Retrained 2026-10-07 on the same split after dropping `voyage_number` and
+# `favored_x_shares` (coefficients +0.03 and +0.05): every held-out metric
+# identical to three decimals, so they were dead weight. Also tried, and
+# not kept, a binary "another ware is at 20 right now" flag: it does carry
+# signal alone (-4.4 when standing in for `total_black_market`), but with
+# `total_black_market` present it adds nothing (R^2 0.2291 vs 0.2288, net
+# value -0.003 pesos) -- the total already encodes how close the game is
+# to ending.
 #
 # **Pooling player counts is deliberate, and was checked rather than
 # assumed.** Nothing here takes player_count as a feature, so the question
@@ -100,15 +133,13 @@ MIN_SCHEMA_VERSION = 2
 # `seat_value.MEASURED_SEAT_PROFIT`, where 4-player is a step and 5-player
 # a clean slope), so don't carry the finding across.
 DEFAULT_COEFFICIENTS: Tuple[float, ...] = (
-    14.0845,
-    -1.1869,
-    4.2816,
-    0.0278,
-    0.4193,
-    0.0538,
-    1.0618,
-    -0.2478,
-    0.1148,
+    14.9311,
+    -0.9107,
+    2.6245,
+    0.3607,
+    0.9500,
+    -0.2335,
+    0.2529,
 )
 
 
@@ -116,7 +147,6 @@ def extract_features(
     ware: Ware,
     shares_in_play: Dict[str, int],
     favored_wares: Sequence[str],
-    voyage_number: int,
     black_market: Dict[str, int],
 ) -> List[float]:
     """Feature row for one ware in one voyage -- see `FEATURE_NAMES`.
@@ -136,9 +166,7 @@ def extract_features(
         1.0,
         own,
         favored,
-        float(voyage_number),
         float(sum(shares_in_play.values())),
-        favored * own,
         level,
         float(sum(black_market.values())),
         level * favored,
@@ -200,10 +228,9 @@ class ShareValueModel:
         ware: Ware,
         shares_in_play: Dict[str, int],
         favored_wares: Sequence[str],
-        voyage_number: int,
         black_market: Dict[str, int],
     ) -> float:
-        row = extract_features(ware, shares_in_play, favored_wares, voyage_number, black_market)
+        row = extract_features(ware, shares_in_play, favored_wares, black_market)
         return sum(c * x for c, x in zip(self.coefficients, row))
 
     def describe(self) -> str:
@@ -253,7 +280,6 @@ def rows_to_examples(rows: Sequence[dict]) -> Tuple[List[List[float]], List[floa
                     ware,
                     row["shares_in_play"],
                     row["favored_wares"],
-                    row["voyage_number"],
                     row["black_market"],
                 )
             )
@@ -281,7 +307,7 @@ def default_model() -> ShareValueModel:
     return ShareValueModel(coefficients=list(DEFAULT_COEFFICIENTS))
 
 
-def train(rows: Sequence[dict], alpha: float = 1.0) -> ShareValueModel:
+def train(rows: Sequence[dict], alpha: float = DEFAULT_ALPHA) -> ShareValueModel:
     features, targets = rows_to_examples(rows)
     return ShareValueModel(coefficients=fit_ridge(features, targets, alpha))
 
@@ -318,7 +344,7 @@ def choose_from_row(model: ShareValueModel, row: dict) -> Optional[Ware]:
     best: Optional[Tuple[float, Ware]] = None
     for ware in _available_wares(row):
         predicted = model.predict(
-            ware, row["shares_in_play"], row["favored_wares"], row["voyage_number"], row["black_market"]
+            ware, row["shares_in_play"], row["favored_wares"], row["black_market"]
         )
         net = predicted - share_price_of(row["black_market"][ware.value])
         if net > 0 and (best is None or net > best[0]):
@@ -410,7 +436,7 @@ def evaluate(model: ShareValueModel, rows: Sequence[dict], seed: int = 0) -> Eva
         scored = [
             (
                 model.predict(
-                    w, row["shares_in_play"], row["favored_wares"], row["voyage_number"], row["black_market"]
+                    w, row["shares_in_play"], row["favored_wares"], row["black_market"]
                 ),
                 w,
             )
@@ -484,7 +510,6 @@ def plan_share_purchase(
             ware,
             {w.value: state.shares_owned(w) for w in Ware},
             favored_wares,
-            state.voyage_number,
             {w.value: v for w, v in state.black_market.values.items()},
         )
         candidate = SharePurchase(

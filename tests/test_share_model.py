@@ -49,13 +49,13 @@ FLAT = {w.value: 0 for w in Ware}
 
 class TestExtractFeatures(unittest.TestCase):
     def test_row_length_matches_the_declared_feature_names(self):
-        row = extract_features(Ware.JADE, FLAT, ["jade"], 1, FLAT)
+        row = extract_features(Ware.JADE, FLAT, ["jade"], FLAT)
         self.assertEqual(len(row), len(FEATURE_NAMES))
 
     def test_flags_the_favored_ware_and_reads_its_own_level(self):
         market = {**FLAT, "jade": 20, "silk": 5}
-        jade = extract_features(Ware.JADE, FLAT, ["jade", "silk"], 3, market)
-        nutmeg = extract_features(Ware.NUTMEG, FLAT, ["jade", "silk"], 3, market)
+        jade = extract_features(Ware.JADE, FLAT, ["jade", "silk"], market)
+        nutmeg = extract_features(Ware.NUTMEG, FLAT, ["jade", "silk"], market)
         by_name = dict(zip(FEATURE_NAMES, jade))
         self.assertEqual(by_name["is_favored"], 1.0)
         self.assertEqual(by_name["black_market"], 20.0)
@@ -63,7 +63,7 @@ class TestExtractFeatures(unittest.TestCase):
 
     def test_totals_span_every_ware_not_just_this_one(self):
         market = {**FLAT, "jade": 20, "silk": 10}
-        by_name = dict(zip(FEATURE_NAMES, extract_features(Ware.JADE, FLAT, [], 1, market)))
+        by_name = dict(zip(FEATURE_NAMES, extract_features(Ware.JADE, FLAT, [], market)))
         self.assertEqual(by_name["total_black_market"], 30.0)
 
 
@@ -159,8 +159,8 @@ class TestTrainedModelLearnsTheMarketSignal(unittest.TestCase):
 
     def test_predicts_a_higher_finish_for_a_higher_current_level(self):
         model = train(self._synthetic(), alpha=0.01)
-        low = model.predict(Ware.JADE, FLAT, ["jade"], 1, {**FLAT, "jade": 0})
-        high = model.predict(Ware.JADE, FLAT, ["jade"], 1, {**FLAT, "jade": 20})
+        low = model.predict(Ware.JADE, FLAT, ["jade"], {**FLAT, "jade": 0})
+        high = model.predict(Ware.JADE, FLAT, ["jade"], {**FLAT, "jade": 20})
         self.assertGreater(high, low)
 
 
